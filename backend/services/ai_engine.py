@@ -15,7 +15,7 @@ client = OpenAI(
 def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
-    Dynamically queries available models to guarantee zero 'Model not found' errors.
+    Uses the latest valid model names (v2.5, v2.1, v2, v1.5) to guarantee zero 'Model not found' errors.
     """
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
@@ -51,7 +51,16 @@ def generate_tor_checklist(text_content: str) -> list:
 """
 
     last_error = None
-    target_models = []
+    
+    # Official OpenTyphoon API latest model iterations (v2.5, v2.1, v2, v1.5)
+    target_models = [
+        "typhoon-v2.5-30b-a3b-instruct", 
+        "typhoon-v2.1-12b-instruct",
+        "typhoon-v2-70b-instruct",
+        "typhoon-v2-8b-instruct",
+        "typhoon-v1.5x-70b-instruct", 
+        "typhoon-v1.5-instruct"
+    ]
 
     try:
         # Dynamically fetch available models directly from OpenTyphoon API
@@ -60,10 +69,10 @@ def generate_tor_checklist(text_content: str) -> list:
         
         # Prioritize instruct models
         instruct_models = [m for m in available_models if 'instruct' in m.lower()]
-        target_models = instruct_models if instruct_models else available_models
+        if instruct_models:
+            target_models = instruct_models + target_models
     except Exception as list_err:
         print(f"Failed to list models: {list_err}")
-        target_models = ["typhoon-v1.5x-70b-instruct", "typhoon-v1.5-instruct", "typhoon-v1.5-70b-instruct", "typhoon-v1.5-8b-instruct"]
 
     for model_name in target_models:
         try:
