@@ -25,9 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TEMPLATE_PATH = r'D:\CBD\TORChecklist\OutputTORChecklist\TOR Checklist template.xlsx'
-OUTPUT_DIR = r'D:\CBD\TORChecklist\OutputTORChecklist'
-TEMP_DIR = r'D:\CBD\TORChecklist\InputTOR'
+# Flexible Root Path Detection (Works on Windows Local & Linux Render Cloud)
+BASE_DIR = r'D:\CBD\TORChecklist' if os.path.exists(r'D:\CBD\TORChecklist') else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+TEMPLATE_PATH = os.path.join(BASE_DIR, 'OutputTORChecklist', 'TOR Checklist template.xlsx')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'OutputTORChecklist')
+TEMP_DIR = os.path.join(BASE_DIR, 'InputTOR')
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -98,7 +101,6 @@ async def upload_tor_file(file: UploadFile = File(...)):
 @app.post("/api/share/email")
 def share_via_email(req: ShareRequest):
     """Mocks or sends email forwarding for demo purposes."""
-    # For demo reliability, return immediate success with mailto fallback
     print(f"Sharing link {req.link} to email {req.email}")
     return {
         "success": True, 

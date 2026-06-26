@@ -3,9 +3,11 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Path configurations defined by USER
-SERVICE_ACCOUNT_KEY = r'D:\CBD\TORChecklist\torchecklistagent-105d923c64f7.json'
-FOLDER_ID_FILE = r'D:\CBD\TORChecklist\GGFolderAddress.txt'
+# Flexible Root Path Detection (Works on Windows Local & Linux Render Cloud)
+BASE_DIR = r'D:\CBD\TORChecklist' if os.path.exists(r'D:\CBD\TORChecklist') else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+SERVICE_ACCOUNT_KEY = os.path.join(BASE_DIR, 'torchecklistagent-105d923c64f7.json')
+FOLDER_ID_FILE = os.path.join(BASE_DIR, 'GGFolderAddress.txt')
 
 def get_drive_service():
     """Authenticates and returns the Google Drive service object."""
