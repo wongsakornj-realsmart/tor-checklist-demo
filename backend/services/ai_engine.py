@@ -15,39 +15,39 @@ client = OpenAI(
 def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
-    Includes robust JSON repair to perfectly handle max_tokens cutoff and prevent 'Unterminated string' errors.
+    Uses dummy generic prompt placeholders to strictly prevent Few-Shot Overfitting / Example Hallucination.
     """
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
-    system_prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐและวิศวกรรมระบบ AI หน้าที่ของคุณคือวิเคราะห์ข้อความจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดต่างๆ ออกมาเป็นตาราง Checklist เพื่อตรวจสอบความสอดคล้อง (Compliance)
+    system_prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐและวิศวกรรมระบบ AI หน้าที่ของคุณคือวิเคราะห์ข้อความจากเอกสาร TOR (Terms of Reference) ที่ผู้ใช้ส่งมา และสกัดข้อกำหนดต่างๆ ออกมาเป็นตาราง Checklist เพื่อตรวจสอบความสอดคล้อง (Compliance)
 
 กรุณาวิเคราะห์ข้อความและแปลงเป็นโครงสร้าง JSON Array โดยแต่ละรายการ (Object) จะต้องมีฟิลด์ดังต่อไปนี้:
 1. "Status": ว่างไว้ ("")
 2. "ลำดับ": หมายเลขลำดับของข้อกำหนด (เช่น "1.", "1.1", "2.")
 3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก (เช่น "ความเป็นมา", "วัตถุประสงค์", "คุณสมบัติของผู้ยื่นข้อเสนอ", "ขอบเขตการดำเนินงาน")
 4. "หัวข้อย่อย": ชื่อหัวข้อย่อย
-5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียด
-6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ผู้รับจ้าง/ผู้ยื่นซองต้องเตรียมยื่น (เช่น "ข้อเสนอทางเทคนิค", "หนังสือรับรองผลงาน", "เอกสารการจดทะเบียนนิติบุคคล")
-7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ (เช่น "ระบุความเข้าใจในความเป็นมา วัตถุประสงค์ และเป้าหมายของโครงการ", "แนบหนังสือรับรองผลงานที่เกี่ยวข้อง")
+5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง
+6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ผู้รับจ้าง/ผู้ยื่นซองต้องเตรียมยื่น (เช่น "ข้อเสนอทางเทคนิค", "หนังสือรับรองผลงาน")
+7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ
 8. "Comply?": "False"
 9. "หมายเหตุ (Remarks)": ว่างไว้ ("")
 
-ตัวอย่าง Output:
+ตัวอย่างโครงสร้าง Output (ห้ามลอกข้อความในตัวอย่างนี้ไปตอบเด็ดขาด ให้ใช้เนื้อหาจากเอกสารจริงเท่านั้น):
 [
   {
     "Status": "",
     "ลำดับ": "1.",
-    "หมวดหมู่หลัก": "ความเป็นมา",
-    "หัวข้อย่อย": "ความเป็นมา",
-    "ข้อกำหนด / รายละเอียด (Requirement / Details)": "การรถไฟฟ้าขนส่งมวลชนแห่งประเทศไทย (รฟม.) ได้มีการจัดทำแผนวิสาหกิจ ประจำปีงบประมาณ 2569 – 2570...",
-    "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (ส่วนบทนำและความเข้าใจในโครงการ)",
-    "รายละเอียดที่ต้องระบุ": "ระบุความเข้าใจในความเป็นมา วัตถุประสงค์ และเป้าหมายของโครงการ พร้อมยืนยันความพร้อมและศักยภาพในการดำเนินงาน",
+    "หมวดหมู่หลัก": "ความเป็นมา หรือ วัตถุประสงค์",
+    "หัวข้อย่อย": "ระบุหัวข้อย่อยจากเนื้อหาจริง",
+    "ข้อกำหนด / รายละเอียด (Requirement / Details)": "ระบุเนื้อหาข้อกำหนดจากเอกสารจริงที่ผู้ใช้ส่งมาเท่านั้น (ห้ามใช้ข้อความสมมติ)",
+    "ชื่อเอกสารที่ใช้ยื่น": "ระบุชื่อเอกสารที่ต้องใช้ยื่นตามจริง (เช่น ข้อเสนอทางเทคนิค, หนังสือรับรอง)",
+    "รายละเอียดที่ต้องระบุ": "ระบุรายละเอียดที่ต้องระบุในเอกสารนั้นๆ",
     "Comply?": "False",
     "หมายเหตุ (Remarks)": ""
   }
 ]
 
-ข้อควรระวัง: ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน เพื่อให้ระบบนำไปแปลงเป็น Excel 9 คอลัมน์ต่อได้ทันที
+คำเตือนสำคัญ: ห้ามนำข้อความในตัวอย่างไปใส่ในผลลัพธ์เด็ดขาด! ให้สกัดเฉพาะเนื้อหาจริงจากเอกสารที่ผู้ใช้ส่งมาเท่านั้น ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน
 """
 
     last_error = None
@@ -63,11 +63,8 @@ def generate_tor_checklist(text_content: str) -> list:
     ]
 
     try:
-        # Dynamically fetch available models directly from OpenTyphoon API
         available_models = [m.id for m in client.models.list().data]
         print(f"Discovered OpenTyphoon models: {available_models}")
-        
-        # Prioritize instruct models
         instruct_models = [m for m in available_models if 'instruct' in m.lower()]
         if instruct_models:
             target_models = instruct_models + target_models
@@ -91,7 +88,6 @@ def generate_tor_checklist(text_content: str) -> list:
                 response_text = response.choices[0].message.content.strip()
                 print(f"Successfully received response from {model_name}")
                 
-                # Extract JSON from response in case there are markdown code blocks
                 try:
                     json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
                     if json_match:
@@ -101,7 +97,6 @@ def generate_tor_checklist(text_content: str) -> list:
                         return json.loads(response_text)
                 except Exception as json_err:
                     print(f"JSON decode error (likely max_tokens cutoff): {json_err}. Repairing JSON objects...")
-                    # Match all complete JSON objects {...} in the text to bypass 'Unterminated string' error
                     object_matches = re.findall(r'\{[^{}]+\}', response_text, re.DOTALL)
                     if object_matches:
                         valid_objs = []
@@ -120,7 +115,6 @@ def generate_tor_checklist(text_content: str) -> list:
                 last_error = str(e)
                 continue
 
-    # Ultimate Fallback: Direct Text Parsing (Extracts real content from uploaded file if AI API fails)
     print(f"All AI models failed (Last error: {last_error}). Using direct text parsing fallback on actual document content...")
     lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
     extracted_reqs = []
