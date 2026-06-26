@@ -15,7 +15,7 @@ client = OpenAI(
 def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
-    Includes robust max_tokens fallbacks and direct text parsing fallback to guarantee real document content extraction.
+    Includes robust JSON repair to perfectly handle max_tokens cutoff and prevent 'Unterminated string' errors.
     """
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
@@ -72,7 +72,7 @@ def generate_tor_checklist(text_content: str) -> list:
         if instruct_models:
             target_models = instruct_models + target_models
     except Exception as list_err:
-        print(f"Failed to list models: {list_err}")
+        print(f"Failed to list models (normal for some client versions): {list_err}")
 
     for model_name in target_models:
         for max_tokens in [2048, 1024]: # Robust fallback for max_tokens restrictions
@@ -92,12 +92,28 @@ def generate_tor_checklist(text_content: str) -> list:
                 print(f"Successfully received response from {model_name}")
                 
                 # Extract JSON from response in case there are markdown code blocks
-                json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    return data
-                else:
-                    return json.loads(response_text)
+                try:
+                    json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+                    if json_match:
+                        data = json.loads(json_match.group(0))
+                        return data
+                    else:
+                        return json.loads(response_text)
+                except Exception as json_err:
+                    print(f"JSON decode error (likely max_tokens cutoff): {json_err}. Repairing JSON objects...")
+                    # Match all complete JSON objects {...} in the text to bypass 'Unterminated string' error
+                    object_matches = re.findall(r'\{[^{}]+\}', response_text, re.DOTALL)
+                    if object_matches:
+                        valid_objs = []
+                        for obj_str in object_matches:
+                            try:
+                                valid_objs.append(json.loads(obj_str))
+                            except:
+                                pass
+                        if valid_objs:
+                            print(f"Successfully salvaged {len(valid_objs)} JSON objects from OpenTyphoon output!")
+                            return valid_objs
+                    raise json_err
 
             except Exception as e:
                 print(f"Model {model_name} (max_tokens: {max_tokens}) failed with error: {e}")

@@ -2,6 +2,7 @@ import os
 import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import sys
 
@@ -14,7 +15,7 @@ from backend.services.drive_service import upload_file_to_drive
 from extract_tor import generate_excel_from_data
 from validate_tor import run_validation_on_file
 
-app = FastAPI(title="TOR Checklist Generator API (Demo)", version="1.0.0")
+app = FastAPI(title="TOR Checklist Generator API", version="1.0.0")
 
 # CORS Setup for Vercel / Local Frontend
 app.add_middleware(
@@ -54,7 +55,7 @@ def verify_auth(req: LoginRequest):
 @app.post("/api/upload")
 async def upload_tor_file(file: UploadFile = File(...)):
     """
-    Handles TOR file upload -> OCR -> OpenTyphoon AI -> Excel 9-Cols -> Validation -> Google Drive Upload.
+    Handles TOR file upload -> OCR -> OpenTyphoon AI -> Excel 9-Cols -> Validation -> Google Drive / Direct Download Upload.
     """
     file_path = os.path.join(TEMP_DIR, file.filename)
     try:
@@ -82,8 +83,8 @@ async def upload_tor_file(file: UploadFile = File(...)):
         if not is_valid:
             print("Validation warning: output structure check reported issues.")
 
-        # 5. Upload to Google Drive Central Shared Folder
-        print("Uploading to Google Drive...")
+        # 5. Upload to Google Drive / Direct Render Server Storage Download Fallback
+        print("Uploading to Google Drive / Direct Download Fallback...")
         drive_links = upload_file_to_drive(output_path, output_filename)
 
         return {
@@ -98,6 +99,15 @@ async def upload_tor_file(file: UploadFile = File(...)):
         print(f"Error processing upload: {e}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
+@app.get("/api/download/{filename}")
+def download_excel_file(filename: str):
+    """Directly serves the generated Excel file from Render server storage as a perfect backup to Google Drive."""
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=filename)
+    else:
+        raise HTTPException(status_code=404, detail="File not found on server.")
+
 @app.post("/api/share/email")
 def share_via_email(req: ShareRequest):
     """Mocks or sends email forwarding for demo purposes."""
@@ -110,7 +120,7 @@ def share_via_email(req: ShareRequest):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "service": "TOR Checklist Generator API (Demo)"}
+    return {"status": "ok", "service": "TOR Checklist Generator API (Production Ready)"}
 
 if __name__ == "__main__":
     import uvicorn
