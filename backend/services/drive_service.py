@@ -9,6 +9,7 @@ BASE_DIR = r'D:\CBD\TORChecklist' if os.path.exists(r'D:\CBD\TORChecklist') else
 
 SERVICE_ACCOUNT_KEY = os.path.join(BASE_DIR, 'torchecklistagent-105d923c64f7.json')
 FOLDER_ID_FILE = os.path.join(BASE_DIR, 'GGFolderAddress.txt')
+DEFAULT_FOLDER_ID = "1QJ6roIdY73BTp2WbdyL1EcT4M3mVjRmq"
 
 def get_drive_service():
     """Authenticates and returns the Google Drive service object using Env Var or File."""
@@ -64,11 +65,13 @@ def upload_file_to_drive(file_path: str, file_name: str) -> dict:
         return mock_response
 
     try:
-        # Read Target Folder ID from Env Var first (Render Cloud), then File (Windows Local)
+        # Read Target Folder ID from Env Var first, then File, then Default Backup
         folder_id = os.getenv("GOOGLE_FOLDER_ID", "")
         if not folder_id and os.path.exists(FOLDER_ID_FILE):
             with open(FOLDER_ID_FILE, 'r', encoding='utf-8') as f:
                 folder_id = f.read().strip()
+        if not folder_id:
+            folder_id = DEFAULT_FOLDER_ID
         
         # If Folder ID is a URL, extract the ID
         if "folders/" in folder_id:

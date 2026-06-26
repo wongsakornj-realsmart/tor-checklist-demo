@@ -15,7 +15,7 @@ client = OpenAI(
 def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
-    Includes robust model fallback to ensure high availability.
+    Dynamically queries available models to guarantee zero 'Model not found' errors.
     """
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
@@ -50,10 +50,22 @@ def generate_tor_checklist(text_content: str) -> list:
 ข้อควรระวัง: ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน เพื่อให้ระบบนำไปแปลงเป็น Excel 9 คอลัมน์ต่อได้ทันที
 """
 
-    models_to_try = ["typhoon-v1.5-instruct", "typhoon-v1.5-70b-instruct", "typhoon-v1.5-8b-instruct"]
     last_error = None
+    target_models = []
 
-    for model_name in models_to_try:
+    try:
+        # Dynamically fetch available models directly from OpenTyphoon API
+        available_models = [m.id for m in client.models.list().data]
+        print(f"Discovered OpenTyphoon models: {available_models}")
+        
+        # Prioritize instruct models
+        instruct_models = [m for m in available_models if 'instruct' in m.lower()]
+        target_models = instruct_models if instruct_models else available_models
+    except Exception as list_err:
+        print(f"Failed to list models: {list_err}")
+        target_models = ["typhoon-v1.5x-70b-instruct", "typhoon-v1.5-instruct", "typhoon-v1.5-70b-instruct", "typhoon-v1.5-8b-instruct"]
+
+    for model_name in target_models:
         try:
             print(f"Attempting OpenTyphoon AI with model: {model_name}...")
             response = client.chat.completions.create(
@@ -67,6 +79,7 @@ def generate_tor_checklist(text_content: str) -> list:
             )
 
             response_text = response.choices[0].message.content.strip()
+            print(f"Successfully received response from {model_name}")
             
             # Extract JSON from response in case there are markdown code blocks
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
