@@ -41,7 +41,7 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) 
     formData.append('file', file);
 
     try {
-      const endpoint = 'http://localhost:8000/api/upload';
+      const endpoint = 'https://tor-checklist-demo.onrender.com/api/upload';
       
       setTimeout(() => {
         setStatusText('OpenTyphoon AI กำลังวิเคราะห์และจัดหมวดหมู่ 9 คอลัมน์...');

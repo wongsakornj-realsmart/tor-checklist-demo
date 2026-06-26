@@ -24,7 +24,7 @@ export const ResultActions: React.FC<ResultActionsProps> = ({ resultData, onRese
     if (!email) return;
     setEmailStatus('กำลังส่งอีเมล...');
     try {
-      const res = await fetch('http://localhost:8000/api/share/email', {
+      const res = await fetch('https://tor-checklist-demo.onrender.com/api/share/email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, link: webViewLink })
