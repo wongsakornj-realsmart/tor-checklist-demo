@@ -70,7 +70,7 @@ def get_drive_service():
 
 def upload_file_to_drive(file_path: str, file_name: str) -> dict:
     """
-    Uploads a file to Google Drive. Includes robust fallback to root drive if target folder has permission/sharing issues.
+    Uploads a file to Google Drive. Includes robust fallback for permission creation in enterprise domains.
     """
     mock_response = {
         "webViewLink": "https://drive.google.com/file/d/demo_mock_view_link/view?usp=sharing",
@@ -123,24 +123,35 @@ def upload_file_to_drive(file_path: str, file_name: str) -> dict:
         file_id = file.get('id')
         print(f"Successfully uploaded file to Google Drive with ID: {file_id}")
 
-        # Set permission to Anyone with the link can view
-        permission = {
-            'type': 'anyone',
-            'role': 'reader'
-        }
-        service.permissions().create(
-            fileId=file_id, body=permission
-        ).execute()
+        # Set permission to Anyone with the link can view (Wrap in try-except in case domain policy restricts public sharing)
+        try:
+            permission = {
+                'type': 'anyone',
+                'role': 'reader'
+            }
+            service.permissions().create(
+                fileId=file_id, body=permission
+            ).execute()
+            print("Successfully set file permission to anyoneReader.")
+        except Exception as perm_err:
+            print(f"Warning: Could not set anyoneReader permission (likely domain policy restriction): {perm_err}. Proceeding with generated links...")
 
         # Re-fetch file to get updated links if needed
-        updated_file = service.files().get(
-            fileId=file_id, fields='id, webViewLink, webContentLink'
-        ).execute()
-
-        return {
-            "webViewLink": updated_file.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view"),
-            "webContentLink": updated_file.get('webContentLink', f"https://drive.google.com/uc?export=download&id={file_id}")
-        }
+        try:
+            updated_file = service.files().get(
+                fileId=file_id, fields='id, webViewLink, webContentLink'
+            ).execute()
+            
+            return {
+                "webViewLink": updated_file.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view"),
+                "webContentLink": updated_file.get('webContentLink', f"https://drive.google.com/uc?export=download&id={file_id}")
+            }
+        except Exception as get_err:
+            print(f"Warning: Could not re-fetch file links: {get_err}. Returning constructed direct links...")
+            return {
+                "webViewLink": f"https://drive.google.com/file/d/{file_id}/view",
+                "webContentLink": f"https://drive.google.com/uc?export=download&id={file_id}"
+            }
 
     except Exception as e:
         print(f"Error uploading file to Google Drive: {e}")
