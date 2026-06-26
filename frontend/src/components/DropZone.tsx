@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 
 interface DropZoneProps {
   onUploadSuccess: (data: any) => void;
-  onError: (msg: str) => void;
+  onError: (msg: string) => void;
 }
 
 export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) => {
@@ -41,10 +41,8 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) 
     formData.append('file', file);
 
     try {
-      // Allow fallback to local/demo server
       const endpoint = 'http://localhost:8000/api/upload';
       
-      // Simulation timeout for ultra-smooth frontend wow demo experience if backend is not locally running
       setTimeout(() => {
         setStatusText('OpenTyphoon AI กำลังวิเคราะห์และจัดหมวดหมู่ 9 คอลัมน์...');
         setProgress(60);
@@ -71,9 +69,10 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) 
         onUploadSuccess(data);
       }, 1000);
 
-    } catch (e) {
+    } catch (e: any) {
       console.warn("Backend fetch failed, triggering interactive full demo simulation mode...", e);
-      // High quality rich aesthetic demo fallback if local uvicorn is offline during presentation
+      onError("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ Backend ได้ ระบบกำลังเปิดโหมดจำลองเดโม่ (Demo Simulation Mode)...");
+      
       setTimeout(() => {
         setProgress(100);
         setIsProcessing(false);

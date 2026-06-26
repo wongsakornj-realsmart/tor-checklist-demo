@@ -48,7 +48,7 @@ export const ResultActions: React.FC<ResultActionsProps> = ({ resultData, onRese
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
         <div>
           <h2>🎉 สร้างไฟล์ TOR Checklist สำเร็จแล้ว!</h2>
-          <p>ประมวลผลตามโครงสร้างเทมเพลต 9 คอลัมน์ พร้อมอัปโหลดขึ้น Google Drive กลางเรียบร้อย</p>
+          <p>ไฟล์: <strong style={{ color: 'var(--accent-primary)' }}>{filename || 'TOR_Checklist.xlsx'}</strong> | ประมวลผลตามโครงสร้างเทมเพลต 9 คอลัมน์ พร้อมอัปโหลดขึ้น Google Drive กลางเรียบร้อย</p>
         </div>
         <button className="btn-secondary" onClick={onReset}>+ อัปโหลดไฟล์ใหม่</button>
       </div>
