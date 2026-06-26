@@ -15,7 +15,7 @@ client = OpenAI(
 def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
-    Uses the latest valid model names (v2.5, v2.1, v2, v1.5) to guarantee zero 'Model not found' errors.
+    Includes robust max_tokens fallbacks and direct text parsing fallback to guarantee real document content extraction.
     """
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
@@ -75,45 +75,62 @@ def generate_tor_checklist(text_content: str) -> list:
         print(f"Failed to list models: {list_err}")
 
     for model_name in target_models:
-        try:
-            print(f"Attempting OpenTyphoon AI with model: {model_name}...")
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"เอกสาร TOR:\n\n{clean_text}"}
-                ],
-                temperature=0.2,
-                max_tokens=4000
-            )
+        for max_tokens in [2048, 1024]: # Robust fallback for max_tokens restrictions
+            try:
+                print(f"Attempting OpenTyphoon AI with model: {model_name} (max_tokens: {max_tokens})...")
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"เอกสาร TOR:\n\n{clean_text}"}
+                    ],
+                    temperature=0.2,
+                    max_tokens=max_tokens
+                )
 
-            response_text = response.choices[0].message.content.strip()
-            print(f"Successfully received response from {model_name}")
-            
-            # Extract JSON from response in case there are markdown code blocks
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                return data
-            else:
-                return json.loads(response_text)
+                response_text = response.choices[0].message.content.strip()
+                print(f"Successfully received response from {model_name}")
+                
+                # Extract JSON from response in case there are markdown code blocks
+                json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    return data
+                else:
+                    return json.loads(response_text)
 
-        except Exception as e:
-            print(f"Model {model_name} failed with error: {e}")
-            last_error = str(e)
-            continue
+            except Exception as e:
+                print(f"Model {model_name} (max_tokens: {max_tokens}) failed with error: {e}")
+                last_error = str(e)
+                continue
 
-    # Fallback Mock Data in case all models fail
-    return [
-        {
+    # Ultimate Fallback: Direct Text Parsing (Extracts real content from uploaded file if AI API fails)
+    print(f"All AI models failed (Last error: {last_error}). Using direct text parsing fallback on actual document content...")
+    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+    extracted_reqs = []
+    for line in lines:
+        if any(keyword in line for keyword in ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต", "โครงการ", "ระบบ"]):
+            extracted_reqs.append(line)
+            if len(extracted_reqs) >= 5: # Grab top 5 key requirements
+                break
+    
+    if not extracted_reqs and lines:
+        extracted_reqs = lines[:5]
+
+    if not extracted_reqs:
+        extracted_reqs = ["ไม่พบข้อความข้อกำหนดในเอกสาร (เอกสารอาจว่างเปล่าหรือสแกนไม่ชัดเจน)"]
+
+    result_rows = []
+    for idx, req in enumerate(extracted_reqs, 1):
+        result_rows.append({
             "Status": "",
-            "ลำดับ": "1.",
-            "หมวดหมู่หลัก": "ความเป็นมา (AI Fallback)",
-            "หัวข้อย่อย": "ความเป็นมา",
-            "ข้อกำหนด / รายละเอียด (Requirement / Details)": "การรถไฟฟ้าขนส่งมวลชนแห่งประเทศไทย (รฟม.) ได้มีการจัดทำแผนวิสาหกิจ ประจำปีงบประมาณ 2569 – 2570...",
-            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (ส่วนบทนำและความเข้าใจในโครงการ)",
-            "รายละเอียดที่ต้องระบุ": "ระบุความเข้าใจในความเป็นมา วัตถุประสงค์ และเป้าหมายของโครงการ พร้อมยืนยันความพร้อมและศักยภาพในการดำเนินงานให้บรรลุวัตถุประสงค์ตามที่ TOR กำหนด",
+            "ลำดับ": f"{idx}.",
+            "หมวดหมู่หลัก": "ข้อกำหนดโครงการ (Direct Extract)",
+            "หัวข้อย่อย": "รายละเอียดข้อกำหนด",
+            "ข้อกำหนด / รายละเอียด (Requirement / Details)": req,
+            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
+            "รายละเอียดที่ต้องระบุ": f"ยืนยันความพร้อมและปฏิบัติตามข้อกำหนด: {req[:50]}...",
             "Comply?": "False",
-            "หมายเหตุ (Remarks)": f"AI Engine Exception: {last_error}"
-        }
-    ]
+            "หมายเหตุ (Remarks)": f"AI API Exception Fallback: {last_error}"
+        })
+    return result_rows

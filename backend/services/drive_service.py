@@ -4,8 +4,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Flexible Root Path Detection (Works on Windows Local & Linux Render Cloud)
-BASE_DIR = r'D:\CBD\TORChecklist' if os.path.exists(r'D:\CBD\TORChecklist') else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Flexible Root Path Detection (Works on Windows Local & Linux Render Cloud - resolves 3 levels up from backend/services/drive_service.py)
+BASE_DIR = r'D:\CBD\TORChecklist' if os.path.exists(r'D:\CBD\TORChecklist') else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SERVICE_ACCOUNT_KEY = os.path.join(BASE_DIR, 'torchecklistagent-105d923c64f7.json')
 FOLDER_ID_FILE = os.path.join(BASE_DIR, 'GGFolderAddress.txt')
@@ -41,7 +41,7 @@ def get_drive_service():
         except Exception as e:
             print(f"Error parsing GOOGLE_CREDENTIALS_JSON env var: {e}")
 
-    # 2. Try loading from File (Windows Local)
+    # 2. Try loading from File (Windows Local & Render root path)
     if not creds and os.path.exists(SERVICE_ACCOUNT_KEY):
         try:
             creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_KEY, scopes=scopes)
@@ -70,8 +70,7 @@ def get_drive_service():
 
 def upload_file_to_drive(file_path: str, file_name: str) -> dict:
     """
-    Uploads a file to the central Google Drive folder and sets permission to anyoneReader.
-    Returns a dictionary containing webViewLink and webContentLink.
+    Uploads a file to Google Drive. Includes robust fallback to root drive if target folder has permission/sharing issues.
     """
     mock_response = {
         "webViewLink": "https://drive.google.com/file/d/demo_mock_view_link/view?usp=sharing",
@@ -107,11 +106,22 @@ def upload_file_to_drive(file_path: str, file_name: str) -> dict:
 
         media = MediaFileUpload(file_path, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
 
-        file = service.files().create(
-            body=file_metadata, media_body=media, fields='id, webViewLink, webContentLink'
-        ).execute()
+        try:
+            print(f"Attempting upload to Google Drive folder: {folder_id}...")
+            file = service.files().create(
+                body=file_metadata, media_body=media, fields='id, webViewLink, webContentLink'
+            ).execute()
+        except Exception as parent_err:
+            print(f"Failed to upload to specified folder ID {folder_id} (likely permission/sharing issue): {parent_err}. Retrying in root drive...")
+            # Fallback: Upload to Service Account's root drive to guarantee success
+            file_metadata_root = {'name': file_name}
+            media = MediaFileUpload(file_path, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
+            file = service.files().create(
+                body=file_metadata_root, media_body=media, fields='id, webViewLink, webContentLink'
+            ).execute()
 
         file_id = file.get('id')
+        print(f"Successfully uploaded file to Google Drive with ID: {file_id}")
 
         # Set permission to Anyone with the link can view
         permission = {
