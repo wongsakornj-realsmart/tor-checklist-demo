@@ -12,11 +12,11 @@ client = OpenAI(
     base_url=TYPHOON_BASE_URL
 )
 
-def generate_tor_checklist(text_content: str, model_name: str = "typhoon-v1.5x-70b-instruct") -> list:
+def generate_tor_checklist(text_content: str) -> list:
     """
     Calls OpenTyphoon AI to parse TOR text content and extract structured items matching the 9 columns.
+    Includes robust model fallback to ensure high availability.
     """
-    # Clean and limit text size to fit in prompt window comfortably while preserving key requirements
     clean_text = text_content[:45000] # Limit to ~45k chars to prevent timeout/context limit in demo
 
     system_prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐและวิศวกรรมระบบ AI หน้าที่ของคุณคือวิเคราะห์ข้อความจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดต่างๆ ออกมาเป็นตาราง Checklist เพื่อตรวจสอบความสอดคล้อง (Compliance)
@@ -50,40 +50,48 @@ def generate_tor_checklist(text_content: str, model_name: str = "typhoon-v1.5x-7
 ข้อควรระวัง: ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน เพื่อให้ระบบนำไปแปลงเป็น Excel 9 คอลัมน์ต่อได้ทันที
 """
 
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"เอกสาร TOR:\n\n{clean_text}"}
-            ],
-            temperature=0.2,
-            max_tokens=4000
-        )
+    models_to_try = ["typhoon-v1.5-instruct", "typhoon-v1.5-70b-instruct", "typhoon-v1.5-8b-instruct"]
+    last_error = None
 
-        response_text = response.choices[0].message.content.strip()
-        
-        # Extract JSON from response in case there are markdown code blocks
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
-            return data
-        else:
-            return json.loads(response_text)
+    for model_name in models_to_try:
+        try:
+            print(f"Attempting OpenTyphoon AI with model: {model_name}...")
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"เอกสาร TOR:\n\n{clean_text}"}
+                ],
+                temperature=0.2,
+                max_tokens=4000
+            )
 
-    except Exception as e:
-        print(f"Error calling OpenTyphoon AI: {e}")
-        # Fallback Mock Data in case of API failure/rate limit during demo
-        return [
-            {
-                "Status": "",
-                "ลำดับ": "1.",
-                "หมวดหมู่หลัก": "ความเป็นมา (AI Fallback)",
-                "หัวข้อย่อย": "ความเป็นมา",
-                "ข้อกำหนด / รายละเอียด (Requirement / Details)": "การรถไฟฟ้าขนส่งมวลชนแห่งประเทศไทย (รฟม.) ได้มีการจัดทำแผนวิสาหกิจ ประจำปีงบประมาณ 2569 – 2570...",
-                "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (ส่วนบทนำและความเข้าใจในโครงการ)",
-                "รายละเอียดที่ต้องระบุ": "ระบุความเข้าใจในความเป็นมา วัตถุประสงค์ และเป้าหมายของโครงการ พร้อมยืนยันความพร้อมและศักยภาพในการดำเนินงานให้บรรลุวัตถุประสงค์ตามที่ TOR กำหนด",
-                "Comply?": "False",
-                "หมายเหตุ (Remarks)": f"AI Engine Exception: {str(e)}"
-            }
-        ]
+            response_text = response.choices[0].message.content.strip()
+            
+            # Extract JSON from response in case there are markdown code blocks
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                return data
+            else:
+                return json.loads(response_text)
+
+        except Exception as e:
+            print(f"Model {model_name} failed with error: {e}")
+            last_error = str(e)
+            continue
+
+    # Fallback Mock Data in case all models fail
+    return [
+        {
+            "Status": "",
+            "ลำดับ": "1.",
+            "หมวดหมู่หลัก": "ความเป็นมา (AI Fallback)",
+            "หัวข้อย่อย": "ความเป็นมา",
+            "ข้อกำหนด / รายละเอียด (Requirement / Details)": "การรถไฟฟ้าขนส่งมวลชนแห่งประเทศไทย (รฟม.) ได้มีการจัดทำแผนวิสาหกิจ ประจำปีงบประมาณ 2569 – 2570...",
+            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (ส่วนบทนำและความเข้าใจในโครงการ)",
+            "รายละเอียดที่ต้องระบุ": "ระบุความเข้าใจในความเป็นมา วัตถุประสงค์ และเป้าหมายของโครงการ พร้อมยืนยันความพร้อมและศักยภาพในการดำเนินงานให้บรรลุวัตถุประสงค์ตามที่ TOR กำหนด",
+            "Comply?": "False",
+            "หมายเหตุ (Remarks)": f"AI Engine Exception: {last_error}"
+        }
+    ]

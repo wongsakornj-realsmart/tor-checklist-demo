@@ -1,4 +1,5 @@
 import os
+import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -10,16 +11,33 @@ SERVICE_ACCOUNT_KEY = os.path.join(BASE_DIR, 'torchecklistagent-105d923c64f7.jso
 FOLDER_ID_FILE = os.path.join(BASE_DIR, 'GGFolderAddress.txt')
 
 def get_drive_service():
-    """Authenticates and returns the Google Drive service object."""
-    if not os.path.exists(SERVICE_ACCOUNT_KEY):
-        print(f"Service account key not found at {SERVICE_ACCOUNT_KEY}. Running in mock mode.")
+    """Authenticates and returns the Google Drive service object using Env Var or File."""
+    creds = None
+    scopes = ['https://www.googleapis.com/auth/drive']
+
+    # 1. Try loading from Environment Variable (Render Cloud)
+    env_creds = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if env_creds:
+        try:
+            creds_info = json.loads(env_creds)
+            creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+            print("Successfully loaded Google Drive Credentials from Environment Variable.")
+        except Exception as e:
+            print(f"Error parsing GOOGLE_CREDENTIALS_JSON env var: {e}")
+
+    # 2. Try loading from File (Windows Local)
+    if not creds and os.path.exists(SERVICE_ACCOUNT_KEY):
+        try:
+            creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_KEY, scopes=scopes)
+            print("Successfully loaded Google Drive Credentials from JSON file.")
+        except Exception as e:
+            print(f"Error loading credentials from file: {e}")
+
+    if not creds:
+        print("Google Drive credentials not found in Env or File. Running in mock mode.")
         return None
 
     try:
-        scopes = ['https://www.googleapis.com/auth/drive']
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_KEY, scopes=scopes
-        )
         service = build('drive', 'v3', credentials=creds)
         return service
     except Exception as e:
@@ -46,9 +64,9 @@ def upload_file_to_drive(file_path: str, file_name: str) -> dict:
         return mock_response
 
     try:
-        # Read Target Folder ID
-        folder_id = ""
-        if os.path.exists(FOLDER_ID_FILE):
+        # Read Target Folder ID from Env Var first (Render Cloud), then File (Windows Local)
+        folder_id = os.getenv("GOOGLE_FOLDER_ID", "")
+        if not folder_id and os.path.exists(FOLDER_ID_FILE):
             with open(FOLDER_ID_FILE, 'r', encoding='utf-8') as f:
                 folder_id = f.read().strip()
         
