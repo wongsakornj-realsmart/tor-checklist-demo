@@ -3,10 +3,16 @@ AI Engine for TOR Checklist System.
 
 Uses OpenTyphoon AI with Dynamic RAG (Knowledge Base) and AI Critic (Self-Correction)
 to extract structured checklist items from TOR documents.
+
+Architecture:
+  1. Metadata Extraction (dedicated small AI call)
+  2. Chunked Checklist Extraction (split document into sections, call AI per chunk)
+  3. AI Critic Self-Correction Loop
 """
 import os
 import json
 import re
+import math
 from openai import OpenAI
 
 from backend.services.knowledge_base import build_tor_knowledge_base, get_knowledge_prompt_section
@@ -21,146 +27,13 @@ client = OpenAI(
     base_url=TYPHOON_BASE_URL
 )
 
-
-def _build_system_prompt(knowledge_section: str) -> str:
-    """Builds the full system prompt with injected RAG knowledge."""
-    base_prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐและวิศวกรรมระบบ AI หน้าที่ของคุณคือวิเคราะห์ข้อความจากเอกสาร TOR (Terms of Reference) ที่ผู้ใช้ส่งมา และสกัดข้อกำหนดต่างๆ ออกมาเป็นตาราง Checklist เพื่อตรวจสอบความสอดคล้อง (Compliance)
-
-กรุณาวิเคราะห์ข้อความและแปลงเป็นโครงสร้าง JSON Object ที่มี 2 ส่วน:
-
-ส่วนที่ 1 - "metadata": ข้อมูลภาพรวมโครงการ ประกอบด้วย:
-- "project_name": ชื่อโครงการ (สกัดจากชื่อเรื่องหรือหัวเรื่องของเอกสาร)
-- "client_name": ชื่อหน่วยงานเจ้าของโครงการ (เช่น ชื่อกรม/กอง/สำนักงาน/บริษัท)
-- "dateline": วันที่สิ้นสุดการยื่นข้อเสนอ หรือวันที่ยื่นซอง (ถ้าไม่มีระบุในเอกสาร ให้ใส่ "")
-
-ส่วนที่ 2 - "checklist": JSON Array ของรายการ Checklist โดยแต่ละรายการมีฟิลด์ดังนี้:
-1. "Status": ว่างไว้ ("")
-2. "ลำดับ": หมายเลขลำดับ (เช่น "1.", "1.1", "2.")
-3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก
-4. "หัวข้อย่อย": ชื่อหัวข้อย่อย
-5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง
-6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ผู้รับจ้าง/ผู้ยื่นซองต้องเตรียมยื่น
-7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ
-8. "Comply?": "False"
-9. "หมายเหตุ (Remarks)": ว่างไว้ ("")
-"""
-
-    if knowledge_section:
-        base_prompt += f"""
-=== ความรู้อ้างอิงจากตัวอย่างเอกสาร TOR ที่ผ่านมา (ใช้เป็นแนวทางรูปแบบเท่านั้น ห้ามลอกเนื้อหา) ===
-{knowledge_section}
-=== จบส่วนความรู้อ้างอิง ===
-"""
-
-    base_prompt += """
-ตัวอย่างโครงสร้าง Output:
-{
-  "metadata": {
-    "project_name": "ชื่อโครงการจริงจากเอกสาร",
-    "client_name": "ชื่อหน่วยงานจริงจากเอกสาร",
-    "dateline": "วันที่ยื่นซอง (ถ้ามี) หรือ ว่าง"
-  },
-  "checklist": [
-    {
-      "Status": "",
-      "ลำดับ": "1.",
-      "หมวดหมู่หลัก": "สกัดจากเอกสารจริง",
-      "หัวข้อย่อย": "สกัดจากเอกสารจริง",
-      "ข้อกำหนด / รายละเอียด (Requirement / Details)": "เนื้อหาจากเอกสารจริงเท่านั้น",
-      "ชื่อเอกสารที่ใช้ยื่น": "สกัดจากเอกสารจริง",
-      "รายละเอียดที่ต้องระบุ": "สกัดจากเอกสารจริง",
-      "Comply?": "False",
-      "หมายเหตุ (Remarks)": ""
-    }
-  ]
-}
-
-คำเตือนสำคัญ:
-- ห้ามนำข้อความในตัวอย่างไปใส่ในผลลัพธ์เด็ดขาด ให้สกัดเฉพาะเนื้อหาจริงจากเอกสารที่ผู้ใช้ส่งมาเท่านั้น
-- ตอบกลับมาเป็น JSON เท่านั้น ห้ามมีข้อความอื่นปน
-- ตรวจสอบคำสะกดให้ถูกต้องก่อนตอบ ใช้คำศัพท์ราชการที่ถูกต้องเสมอ"""
-
-    return base_prompt
+# Chunk size for splitting long documents (chars per chunk)
+CHUNK_SIZE = 12000
+CHUNK_OVERLAP = 500
 
 
-def _parse_ai_response(response_text: str) -> dict:
-    """
-    Parses the AI response into metadata + checklist structure.
-    Handles both the new format (with metadata) and legacy format (array only).
-    """
-    # Try parsing as full JSON object with metadata
-    try:
-        obj_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if obj_match:
-            data = json.loads(obj_match.group(0))
-            if 'metadata' in data and 'checklist' in data:
-                return data
-            # If it's a single checklist item, wrap it
-            if 'ลำดับ' in data:
-                return {"metadata": {}, "checklist": [data]}
-    except:
-        pass
-
-    # Try parsing as JSON Array (legacy format / fallback)
-    try:
-        arr_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if arr_match:
-            data = json.loads(arr_match.group(0))
-            if isinstance(data, list):
-                return {"metadata": {}, "checklist": data}
-    except:
-        pass
-
-    # Last resort: extract individual complete JSON objects
-    object_matches = re.findall(r'\{[^{}]+\}', response_text, re.DOTALL)
-    if object_matches:
-        valid_objs = []
-        for obj_str in object_matches:
-            try:
-                obj = json.loads(obj_str)
-                if 'ลำดับ' in obj or 'หมวดหมู่หลัก' in obj:
-                    valid_objs.append(obj)
-            except:
-                pass
-        if valid_objs:
-            print(f"[AI Engine] Salvaged {len(valid_objs)} JSON objects from truncated response")
-            return {"metadata": {}, "checklist": valid_objs}
-
-    return None
-
-
-def generate_tor_checklist(text_content: str) -> dict:
-    """
-    Main entry point: Extracts structured TOR checklist from document text.
-
-    Pipeline:
-      1. Load Knowledge Base (RAG)
-      2. Call OpenTyphoon AI for initial extraction (metadata + checklist)
-      3. Call AI Critic for self-correction
-      4. Return final result
-
-    Returns:
-        dict with keys: "metadata" (dict) and "checklist" (list)
-    """
-    clean_text = text_content[:45000]
-
-    # Step 1: Load Knowledge Base
-    print("[AI Engine] Step 1: Loading TOR Knowledge Base...")
-    try:
-        kb = build_tor_knowledge_base()
-        knowledge_section = get_knowledge_prompt_section(kb)
-        print(f"[AI Engine] Knowledge Base loaded: {len(kb.get('category_names', []))} categories, {len(kb.get('document_types', []))} doc types")
-    except Exception as kb_err:
-        print(f"[AI Engine] Knowledge Base load failed (non-critical): {kb_err}")
-        knowledge_section = ""
-
-    # Build system prompt with RAG knowledge
-    system_prompt = _build_system_prompt(knowledge_section)
-
-    # Step 2: Call OpenTyphoon AI
-    print("[AI Engine] Step 2: Initial AI Extraction (Metadata + Checklist)...")
-    last_error = None
-
+def _get_target_models() -> list:
+    """Get list of available models, with dynamic discovery."""
     target_models = [
         "typhoon-v2.5-30b-a3b-instruct",
         "typhoon-v2.1-12b-instruct",
@@ -169,123 +42,335 @@ def generate_tor_checklist(text_content: str) -> dict:
         "typhoon-v1.5x-70b-instruct",
         "typhoon-v1.5-instruct"
     ]
-
     try:
         available_models = [m.id for m in client.models.list().data]
-        print(f"[AI Engine] Discovered OpenTyphoon models: {available_models}")
+        print(f"[AI Engine] Discovered models: {available_models}")
         instruct_models = [m for m in available_models if 'instruct' in m.lower()]
         if instruct_models:
             target_models = instruct_models + target_models
-    except Exception as list_err:
-        print(f"[AI Engine] Failed to list models: {list_err}")
+    except Exception as e:
+        print(f"[AI Engine] Model discovery failed: {e}")
+    return target_models
 
-    result = None
+
+def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
+    """Makes an AI call with model fallback. Returns raw response text or None."""
+    target_models = _get_target_models()
     for model_name in target_models:
-        for max_tokens in [2048, 1024]:
+        for mt in [max_tokens, max_tokens // 2]:
             try:
-                print(f"[AI Engine] Trying model: {model_name} (max_tokens: {max_tokens})...")
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"เอกสาร TOR:\n\n{clean_text}"}
+                        {"role": "user", "content": user_content}
                     ],
-                    temperature=0.2,
-                    max_tokens=max_tokens
+                    temperature=0.15,
+                    max_tokens=mt
                 )
-
-                response_text = response.choices[0].message.content.strip()
-                print(f"[AI Engine] Got response from {model_name} ({len(response_text)} chars)")
-
-                parsed = _parse_ai_response(response_text)
-                if parsed and parsed.get('checklist'):
-                    result = parsed
-                    print(f"[AI Engine] Extracted {len(result['checklist'])} checklist items")
-                    break
-                else:
-                    print(f"[AI Engine] Could not parse response from {model_name}")
-                    continue
-
+                text = response.choices[0].message.content.strip()
+                if text:
+                    return text
             except Exception as e:
-                print(f"[AI Engine] Model {model_name} (max_tokens: {max_tokens}) failed: {e}")
-                last_error = str(e)
+                print(f"[AI Engine] {model_name} (max_tokens={mt}) failed: {e}")
                 continue
+    return None
 
-        if result:
-            break
 
-    # If all AI models failed, use direct text parsing fallback
-    if not result:
-        print(f"[AI Engine] All AI models failed. Using direct text parsing fallback...")
-        result = _direct_text_fallback(clean_text, last_error)
+def _parse_json_array(text: str) -> list:
+    """Robustly parses a JSON array from AI response text."""
+    if not text:
+        return []
 
-    # Step 3: AI Critic Self-Correction
-    print("[AI Engine] Step 3: AI Critic Self-Correction Loop...")
+    # Try full array parse
     try:
-        corrected_checklist = evaluate_and_correct_checklist(clean_text, result['checklist'])
-        result['checklist'] = corrected_checklist
-        print(f"[AI Engine] Critic completed. Final checklist: {len(result['checklist'])} items")
-    except Exception as critic_err:
-        print(f"[AI Engine] Critic failed (non-critical, using uncorrected data): {critic_err}")
+        arr_match = re.search(r'\[.*\]', text, re.DOTALL)
+        if arr_match:
+            return json.loads(arr_match.group(0))
+    except:
+        pass
 
-    # Ensure metadata has all required fields
-    meta = result.get('metadata', {})
-    if not isinstance(meta, dict):
-        meta = {}
-    result['metadata'] = {
+    # Salvage individual objects (for truncated responses)
+    object_matches = re.findall(r'\{[^{}]+\}', text, re.DOTALL)
+    valid_objs = []
+    for obj_str in object_matches:
+        try:
+            obj = json.loads(obj_str)
+            if any(k in obj for k in ['ลำดับ', 'หมวดหมู่หลัก', 'ข้อกำหนด']):
+                valid_objs.append(obj)
+        except:
+            pass
+    if valid_objs:
+        print(f"[AI Engine] Salvaged {len(valid_objs)} objects from truncated response")
+    return valid_objs
+
+
+def _parse_json_object(text: str) -> dict:
+    """Parses a JSON object from AI response text."""
+    if not text:
+        return {}
+    try:
+        obj_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if obj_match:
+            return json.loads(obj_match.group(0))
+    except:
+        pass
+    return {}
+
+
+# ========================================================================
+# STEP 1: Metadata Extraction (Dedicated small call)
+# ========================================================================
+
+METADATA_SYSTEM_PROMPT = """คุณคือผู้เชี่ยวชาญด้านการวิเคราะห์เอกสาร TOR (Terms of Reference) ภาครัฐไทย
+หน้าที่ของคุณคือสกัดข้อมูลภาพรวมโครงการจากข้อความของเอกสาร TOR
+
+กรุณาสกัดข้อมูลต่อไปนี้:
+1. "project_name": ชื่อโครงการ/ชื่อเรื่องของงาน (เช่น "โครงการจ้างพัฒนาระบบ..." หรือ "งานจ้างบริการ...")
+2. "client_name": ชื่อหน่วยงานเจ้าของโครงการ (เช่น "สำนักงานพัฒนารัฐบาลดิจิทัล" หรือ "กรมบัญชีกลาง")
+3. "dateline": วันที่สิ้นสุดการยื่นข้อเสนอ หรือวันที่ยื่นซอง (ถ้าไม่มีระบุในเอกสาร ให้ใส่ "")
+
+ตอบกลับเป็น JSON Object เท่านั้น:
+{"project_name": "...", "client_name": "...", "dateline": "..."}
+
+สำคัญ: สกัดจากเนื้อหาจริงของเอกสารเท่านั้น ห้ามสมมติข้อมูลขึ้นมา"""
+
+
+def _extract_metadata(text_content: str) -> dict:
+    """Extracts project metadata using a dedicated small AI call."""
+    print("[AI Engine] Extracting metadata...")
+    # Use first 5000 chars (metadata is always at the beginning)
+    short_text = text_content[:5000]
+
+    response_text = _call_ai(METADATA_SYSTEM_PROMPT, f"เอกสาร TOR:\n\n{short_text}", max_tokens=512)
+    meta = _parse_json_object(response_text)
+
+    if meta:
+        print(f"[AI Engine] Metadata extracted: project={meta.get('project_name', '')[:50]}, client={meta.get('client_name', '')[:30]}")
+    else:
+        # Fallback: try to extract from text directly
+        print("[AI Engine] AI metadata extraction failed, using text parsing fallback...")
+        meta = _extract_metadata_from_text(text_content)
+
+    return {
         'project_name': meta.get('project_name', ''),
         'client_name': meta.get('client_name', ''),
         'dateline': meta.get('dateline', '')
     }
 
-    return result
+
+def _extract_metadata_from_text(text: str) -> dict:
+    """Fallback: extract metadata directly from text patterns."""
+    lines = [l.strip() for l in text[:5000].split('\n') if l.strip()]
+    project_name = ""
+    client_name = ""
+
+    for line in lines[:30]:
+        # Project name patterns
+        if not project_name:
+            if any(kw in line for kw in ['โครงการ', 'เรื่อง', 'งานจ้าง', 'งานซื้อ', 'TOR']):
+                if len(line) > 10:
+                    project_name = line[:200]
+        # Client name patterns
+        if not client_name:
+            if any(kw in line for kw in ['สำนักงาน', 'กรม', 'กอง', 'การ', 'มหาวิทยาลัย', 'จัดทำโดย']):
+                if len(line) > 5:
+                    client_name = line[:100]
+
+    return {'project_name': project_name, 'client_name': client_name, 'dateline': ''}
 
 
-def _direct_text_fallback(clean_text: str, last_error: str) -> dict:
-    """Fallback when all AI models fail: extract requirements directly from text."""
-    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
-    extracted_reqs = []
+# ========================================================================
+# STEP 2: Chunked Checklist Extraction
+# ========================================================================
+
+def _build_checklist_prompt(knowledge_section: str) -> str:
+    """Builds the checklist extraction system prompt with RAG knowledge."""
+    prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐไทย หน้าที่ของคุณคือวิเคราะห์ข้อความส่วนหนึ่งจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดทุกข้อออกมาเป็นตาราง Checklist
+
+สิ่งสำคัญที่สุด: คุณต้องสกัดข้อกำหนดทุกข้อที่ปรากฏในเอกสาร ห้ามข้ามหรือละเว้นข้อใดข้อหนึ่ง ทุกย่อหน้าที่มีเนื้อหาเกี่ยวกับข้อกำหนด ขอบเขตงาน คุณสมบัติ เงื่อนไข หรือรายละเอียดทางเทคนิค ต้องถูกสกัดออกมาเป็นรายการ
+
+แปลงเป็น JSON Array โดยแต่ละรายการมีฟิลด์:
+1. "Status": ""
+2. "ลำดับ": หมายเลขลำดับตามเอกสารต้นฉบับ (เช่น "1.", "1.1", "2.", "ก.", "1)")
+3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก (เช่น "ความเป็นมา", "วัตถุประสงค์", "คุณสมบัติของผู้ยื่นข้อเสนอ", "ขอบเขตการดำเนินงาน", "คุณลักษณะเฉพาะ")
+4. "หัวข้อย่อย": ชื่อหัวข้อย่อย
+5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง (ห้ามย่อ ห้ามสรุป ให้ใส่เนื้อหาเต็ม)
+6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ต้องเตรียมยื่น
+7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ
+8. "Comply?": "False"
+9. "หมายเหตุ (Remarks)": ""
+
+คำเตือน: ตอบกลับเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน ให้สกัดทุกข้อกำหนดอย่างครบถ้วน"""
+
+    if knowledge_section:
+        prompt += f"""
+
+=== ความรู้อ้างอิง (ใช้เป็นแนวทางรูปแบบเท่านั้น ห้ามลอกเนื้อหา) ===
+{knowledge_section}
+=== จบส่วนความรู้อ้างอิง ==="""
+
+    return prompt
+
+
+def _split_into_chunks(text: str) -> list:
+    """Splits text into overlapping chunks for processing."""
+    if len(text) <= CHUNK_SIZE:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_SIZE
+
+        # Try to split at a paragraph break
+        if end < len(text):
+            # Look for a good break point (newline, period, etc.)
+            break_point = text.rfind('\n', start + CHUNK_SIZE - 2000, end)
+            if break_point > start:
+                end = break_point
+
+        chunks.append(text[start:end])
+        start = end - CHUNK_OVERLAP  # overlap to avoid losing content at boundaries
+
+    print(f"[AI Engine] Split document into {len(chunks)} chunks ({len(text)} chars total)")
+    return chunks
+
+
+def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int,
+                                   system_prompt: str) -> list:
+    """Extracts checklist items from a single text chunk."""
+    print(f"[AI Engine] Processing chunk {chunk_num}/{total_chunks} ({len(chunk_text)} chars)...")
+
+    user_msg = f"ส่วนที่ {chunk_num}/{total_chunks} ของเอกสาร TOR:\n\n{chunk_text}"
+    response_text = _call_ai(system_prompt, user_msg, max_tokens=4096)
+    items = _parse_json_array(response_text)
+    print(f"[AI Engine] Chunk {chunk_num}: extracted {len(items)} items")
+    return items
+
+
+def _deduplicate_checklist(items: list) -> list:
+    """Removes duplicate items from combined chunks (based on ข้อกำหนด content)."""
+    seen = set()
+    unique_items = []
+    for item in items:
+        # Create a fingerprint from key content
+        content = item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')
+        # Use first 100 chars as fingerprint to catch duplicates from chunk overlaps
+        fingerprint = content[:100].strip()
+        if fingerprint and fingerprint not in seen:
+            seen.add(fingerprint)
+            unique_items.append(item)
+        elif not fingerprint:
+            unique_items.append(item)  # Keep items without content (shouldn't happen)
+    
+    removed = len(items) - len(unique_items)
+    if removed > 0:
+        print(f"[AI Engine] Deduplication: removed {removed} duplicate items")
+    return unique_items
+
+
+# ========================================================================
+# MAIN ENTRY POINT
+# ========================================================================
+
+def generate_tor_checklist(text_content: str) -> dict:
+    """
+    Main entry point: Extracts structured TOR checklist from document text.
+
+    Pipeline:
+      1. Load Knowledge Base (RAG)
+      2. Extract Metadata (dedicated small AI call)
+      3. Chunked Checklist Extraction (split document, call AI per chunk)
+      4. Deduplicate merged results
+      5. AI Critic Self-Correction Loop
+      6. Return final result
+
+    Returns:
+        dict with keys: "metadata" (dict) and "checklist" (list)
+    """
+    clean_text = text_content[:96000]  # Allow up to 96k chars (full document)
+
+    # Step 1: Load Knowledge Base
+    print("[AI Engine] Step 1: Loading TOR Knowledge Base...")
+    knowledge_section = ""
+    try:
+        kb = build_tor_knowledge_base()
+        knowledge_section = get_knowledge_prompt_section(kb)
+        print(f"[AI Engine] KB loaded: {len(kb.get('category_names', []))} categories, {len(kb.get('document_types', []))} doc types")
+    except Exception as kb_err:
+        print(f"[AI Engine] KB failed (non-critical): {kb_err}")
+
+    # Step 2: Extract Metadata
+    print("[AI Engine] Step 2: Extracting Metadata...")
+    metadata = _extract_metadata(clean_text)
+
+    # Step 3: Chunked Checklist Extraction
+    print("[AI Engine] Step 3: Chunked Checklist Extraction...")
+    system_prompt = _build_checklist_prompt(knowledge_section)
+    chunks = _split_into_chunks(clean_text)
+
+    all_items = []
+    for i, chunk in enumerate(chunks, 1):
+        chunk_items = _extract_checklist_from_chunk(chunk, i, len(chunks), system_prompt)
+        all_items.extend(chunk_items)
+
+    if not all_items:
+        print("[AI Engine] All AI extraction failed. Using direct text parsing fallback...")
+        all_items = _direct_text_fallback(clean_text)
+
+    # Step 4: Deduplicate
+    print(f"[AI Engine] Step 4: Deduplicating {len(all_items)} items...")
+    all_items = _deduplicate_checklist(all_items)
+
+    # Step 5: Re-number items sequentially
+    for idx, item in enumerate(all_items, 1):
+        if not item.get('ลำดับ'):
+            item['ลำดับ'] = f"{idx}."
+
+    print(f"[AI Engine] Total checklist items after dedup: {len(all_items)}")
+
+    # Step 6: AI Critic Self-Correction
+    print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
+    try:
+        corrected = evaluate_and_correct_checklist(clean_text, all_items)
+        if corrected and len(corrected) > 0:
+            all_items = corrected
+            print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
+    except Exception as critic_err:
+        print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
+
+    return {
+        "metadata": metadata,
+        "checklist": all_items
+    }
+
+
+def _direct_text_fallback(clean_text: str) -> list:
+    """Fallback when all AI models fail."""
+    lines = [l.strip() for l in clean_text.split('\n') if l.strip() and len(l.strip()) > 15]
+    extracted = []
+    keywords = ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต",
+                 "โครงการ", "ระบบ", "คุณสมบัติ", "เงื่อนไข", "การดำเนินงาน",
+                 "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา"]
     for line in lines:
-        if any(kw in line for kw in ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต", "โครงการ", "ระบบ"]):
-            extracted_reqs.append(line)
-            if len(extracted_reqs) >= 10:
-                break
+        if any(kw in line for kw in keywords):
+            extracted.append(line)
 
-    if not extracted_reqs and lines:
-        extracted_reqs = lines[:5]
+    if not extracted:
+        extracted = lines[:20]
 
-    if not extracted_reqs:
-        extracted_reqs = ["ไม่พบข้อความข้อกำหนดในเอกสาร (เอกสารอาจว่างเปล่าหรือสแกนไม่ชัดเจน)"]
-
-    checklist = []
-    for idx, req in enumerate(extracted_reqs, 1):
-        checklist.append({
+    result = []
+    for idx, req in enumerate(extracted, 1):
+        result.append({
             "Status": "",
             "ลำดับ": f"{idx}.",
             "หมวดหมู่หลัก": "ข้อกำหนดโครงการ (Direct Extract)",
-            "หัวข้อย่อย": "รายละเอียดข้อกำหนด",
+            "หัวข้อย่อย": "",
             "ข้อกำหนด / รายละเอียด (Requirement / Details)": req,
-            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
-            "รายละเอียดที่ต้องระบุ": f"ยืนยันความพร้อมตามข้อกำหนด: {req[:50]}...",
+            "ชื่อเอกสารที่ใช้ยื่น": "",
+            "รายละเอียดที่ต้องระบุ": "",
             "Comply?": "False",
-            "หมายเหตุ (Remarks)": f"AI API Fallback: {last_error}" if last_error else ""
+            "หมายเหตุ (Remarks)": "AI Fallback"
         })
-
-    # Try to extract metadata from first few lines
-    project_name = ""
-    client_name = ""
-    for line in lines[:15]:
-        if 'โครงการ' in line or 'เรื่อง' in line:
-            project_name = line[:120]
-        if any(kw in line for kw in ['กรม', 'สำนักงาน', 'กอง', 'การ', 'มหาวิทยาลัย']):
-            if not client_name:
-                client_name = line[:80]
-
-    return {
-        "metadata": {
-            "project_name": project_name,
-            "client_name": client_name,
-            "dateline": ""
-        },
-        "checklist": checklist
-    }
+    return result

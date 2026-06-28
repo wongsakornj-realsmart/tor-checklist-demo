@@ -34,7 +34,7 @@ def _extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
     return text.strip()
 
 
-def _extract_checklist_patterns(xlsx_path: str, max_rows: int = 30) -> list:
+def _extract_checklist_patterns(xlsx_path: str, max_rows: int = 500) -> list:
     """
     Reads a sample TOR Checklist Excel file and extracts row patterns
     showing how TOR requirements map to checklist columns.
@@ -163,7 +163,7 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
         for fname in sorted(os.listdir(SAMPLE_CHECKLIST_DIR)):
             if fname.lower().endswith('.xlsx'):
                 fpath = os.path.join(SAMPLE_CHECKLIST_DIR, fname)
-                rows = _extract_checklist_patterns(fpath, max_rows=15)
+                rows = _extract_checklist_patterns(fpath, max_rows=500)
                 if rows:
                     kb['checklist_examples'].append({
                         'source': fname,
@@ -234,14 +234,18 @@ def get_knowledge_prompt_section(kb: dict) -> str:
     # 4. Sample checklist rows (pick 3 diverse examples from different files)
     examples = kb.get('checklist_examples', [])
     sample_rows = []
-    for ex in examples[:3]:
+    for ex in examples[:5]:
         rows = ex.get('rows', [])
         if rows:
-            sample_rows.append(rows[0])  # first row from each file
+            # Pick first row and a mid-section row to show diversity
+            sample_rows.append(rows[0])
+            if len(rows) > 10:
+                sample_rows.append(rows[len(rows)//2])
     if sample_rows:
+        # Limit to 5 diverse examples to keep prompt manageable
         sections.append(
             "ตัวอย่างรูปแบบการเขียนรายการ Checklist (ใช้เป็นแนวทางรูปแบบเท่านั้น ห้ามลอกเนื้อหา):\n" +
-            json.dumps(sample_rows[:3], ensure_ascii=False, indent=2)
+            json.dumps(sample_rows[:5], ensure_ascii=False, indent=2)
         )
 
     return "\n\n".join(sections)
