@@ -15,7 +15,7 @@ from backend.services.drive_service import upload_file_to_drive
 from extract_tor import generate_excel_from_data
 from validate_tor import run_validation_on_file
 
-app = FastAPI(title="TOR Checklist Generator API", version="1.0.0")
+app = FastAPI(title="TOR Checklist Generator API", version="2.0.0")
 
 # CORS Setup for Vercel / Local Frontend
 app.add_middleware(
@@ -55,7 +55,13 @@ def verify_auth(req: LoginRequest):
 @app.post("/api/upload")
 async def upload_tor_file(file: UploadFile = File(...)):
     """
-    Handles TOR file upload -> OCR -> OpenTyphoon AI -> Excel 9-Cols -> Validation -> Google Drive / Direct Download Upload.
+    Handles TOR file upload pipeline:
+      1. OCR / Text Extraction
+      2. AI RAG Extraction (Metadata + Checklist) with Knowledge Base
+      3. AI Critic Self-Correction Loop
+      4. Generate Excel (New template: Metadata Row 1-3, Data Row 6+)
+      5. Validation
+      6. Upload to Google Drive / Direct Download Fallback
     """
     file_path = os.path.join(TEMP_DIR, file.filename)
     try:
@@ -63,45 +69,52 @@ async def upload_tor_file(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
             
         # 1. OCR / Text Extraction
-        print(f"Extracting text from {file.filename}...")
+        print(f"[Upload] Extracting text from {file.filename}...")
         text_content = extract_text_from_file(file_path)
         if not text_content or text_content.startswith("[Error"):
             raise HTTPException(status_code=400, detail="Failed to extract text from file.")
 
-        # 2. OpenTyphoon AI Extraction & Synthesis (9 Columns)
-        print("Calling OpenTyphoon AI...")
-        checklist_items = generate_tor_checklist(text_content)
+        # 2 & 3. AI RAG Extraction + Critic Self-Correction (returns dict with metadata + checklist)
+        print("[Upload] Calling AI Engine (RAG + Critic)...")
+        ai_result = generate_tor_checklist(text_content)
+        
+        # Extract metadata and checklist from AI result
+        metadata = ai_result.get('metadata', {})
+        checklist_items = ai_result.get('checklist', [])
 
-        # 3. Generate Excel File
+        # 4. Generate Excel File (New template structure)
         output_filename = f"{os.path.splitext(file.filename)[0]}_Checklist.xlsx"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
-        print("Generating Excel file...")
-        generate_excel_from_data(checklist_items, TEMPLATE_PATH, output_path)
+        print(f"[Upload] Generating Excel: {output_filename}...")
+        generate_excel_from_data(checklist_items, TEMPLATE_PATH, output_path, metadata=metadata)
 
-        # 4. Validation (Format Audit)
+        # 5. Validation (Format + Metadata + Data Audit)
         is_valid = run_validation_on_file(output_path)
         if not is_valid:
-            print("Validation warning: output structure check reported issues.")
+            print("[Upload] Validation warning: output structure check reported issues.")
 
-        # 5. Upload to Google Drive / Direct Render Server Storage Download Fallback
-        print("Uploading to Google Drive / Direct Download Fallback...")
+        # 6. Upload to Google Drive / Direct Render Server Storage Download Fallback
+        print("[Upload] Uploading to Google Drive / Direct Download Fallback...")
         drive_links = upload_file_to_drive(output_path, output_filename)
 
         return {
             "success": True,
             "filename": output_filename,
+            "metadata": metadata,
             "data": checklist_items,
             "webViewLink": drive_links.get("webViewLink"),
             "webContentLink": drive_links.get("webContentLink")
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error processing upload: {e}")
+        print(f"[Upload] Error processing upload: {e}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 @app.get("/api/download/{filename}")
 def download_excel_file(filename: str):
-    """Directly serves the generated Excel file from Render server storage as a perfect backup to Google Drive."""
+    """Directly serves the generated Excel file from Render server storage."""
     file_path = os.path.join(OUTPUT_DIR, filename)
     if os.path.exists(file_path):
         return FileResponse(file_path, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=filename)
@@ -120,7 +133,7 @@ def share_via_email(req: ShareRequest):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "service": "TOR Checklist Generator API (Production Ready)"}
+    return {"status": "ok", "service": "TOR Checklist Generator API v2.0 (RAG + Critic)", "version": "2.0.0"}
 
 if __name__ == "__main__":
     import uvicorn

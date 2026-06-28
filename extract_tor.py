@@ -19,7 +19,7 @@ def fix_spelling(text):
     # 2. Dictionary of common OCR spelling errors in technical documents and known anomalies
     common_fixes = {
         'ผยู้ น': 'ผู้ยื่น',
-        'ผยู้น': 'ผู้ยื่น',
+        'ผยู้น': 'ผู้ยื่น',
         'กำหน ด': 'กำหนด',
         'ขอบเข ต': 'ขอบเขต',
         'เคื่รอง': 'เครื่อง',
@@ -55,15 +55,25 @@ def fix_spelling(text):
         'จดั': 'จัด',
         'ไมพ่': 'ไม่พ',
         'ดงั': 'ดัง',
+        'เหุตผล': 'เหตุผล',
+        'วัตถุประสงค ์': 'วัตถุประสงค์',
         '\uf0a0': '', # Remove private use bullet points
     }
     for wrong, right in common_fixes.items():
         text = text.replace(wrong, right)
     return text
 
-def generate_excel_from_data(rows: list, template_path: str, output_path: str):
+def generate_excel_from_data(rows: list, template_path: str, output_path: str, metadata: dict = None):
     """
     Populates the 9-column TOR Checklist template with extracted/AI-generated rows.
+    
+    New template structure (updated June 2026):
+    - Row 1: Label "ชื่อโครงการ" (col A) + project name (col B)
+    - Row 2: Label "ชื่อลูกค้า" (col A) + client name (col B)
+    - Row 3: Label "Dateline" (col A) + dateline (col B)
+    - Row 4: (blank separator)
+    - Row 5: 9-column headers (Status, ลำดับ, หมวดหมู่หลัก, ...)
+    - Row 6+: Checklist data rows
     """
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
@@ -71,7 +81,21 @@ def generate_excel_from_data(rows: list, template_path: str, output_path: str):
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
 
-    start_row = 2
+    # Write Metadata to Rows 1-3 (Column B = column 2)
+    if metadata and isinstance(metadata, dict):
+        project_name = metadata.get('project_name', '')
+        client_name = metadata.get('client_name', '')
+        dateline = metadata.get('dateline', '')
+        
+        if project_name:
+            ws.cell(row=1, column=2, value=fix_spelling(project_name))
+        if client_name:
+            ws.cell(row=2, column=2, value=fix_spelling(client_name))
+        if dateline:
+            ws.cell(row=3, column=2, value=fix_spelling(dateline))
+
+    # Write Checklist data starting at Row 6 (after Row 5 headers)
+    start_row = 6
     for idx, row in enumerate(rows):
         ws.cell(row=start_row + idx, column=1, value=row.get('Status', ''))
         ws.cell(row=start_row + idx, column=2, value=row.get('ลำดับ', ''))
@@ -84,7 +108,7 @@ def generate_excel_from_data(rows: list, template_path: str, output_path: str):
         ws.cell(row=start_row + idx, column=9, value=row.get('หมายเหตุ (Remarks)', ''))
 
     wb.save(output_path)
-    print(f'Successfully generated {output_path} with {len(rows)} rows (9 columns).')
+    print(f'Successfully generated {output_path} with {len(rows)} rows (9 columns). Metadata: project="{metadata.get("project_name", "") if metadata else ""}"')
     return output_path
 
 if __name__ == '__main__':
