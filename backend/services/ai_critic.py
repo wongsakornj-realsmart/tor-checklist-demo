@@ -2,8 +2,8 @@
 AI Critic Agent for TOR Checklist System.
 
 Acts as a Quality Auditor that reviews and corrects the AI-generated checklist
-items for spelling accuracy, logical coherence, and compliance with Thai
-government procurement terminology.
+items for spelling accuracy, logical coherence, completeness of required fields,
+and compliance with Thai government procurement terminology.
 """
 import os
 import json
@@ -33,6 +33,10 @@ CRITIC_SYSTEM_PROMPT = """คุณคือผู้ตรวจสอบคุ
 4. ตรวจความสอดคล้อง: ตรวจให้แน่ใจว่าเนื้อหาในแต่ละบรรทัดสอดคล้องกับหมวดหมู่หลักและหัวข้อย่อยที่ระบุไว้
 5. ตรวจความซ้ำซ้อน: หากมีข้อความซ้ำกัน 100% ให้รวมเป็นรายการเดียว
 6. ห้ามเปลี่ยนเนื้อหาหลัก: ห้ามเพิ่มข้อกำหนดใหม่ที่ไม่มีในต้นฉบับ ห้ามลบข้อกำหนดที่ถูกต้องออก ให้แก้ไขเฉพาะจุดบกพร่องเท่านั้น
+7. ตรวจสอบความครบถ้วนของข้อมูล (สำคัญมาก!): 
+   - ฟิลด์ "ชื่อเอกสารที่ใช้ยื่น": หากพบว่าเป็นค่าว่าง "" ให้เติมชื่อเอกสารที่เหมาะสม เช่น "ข้อเสนอทางเทคนิค (Technical Proposal)" หรือ "หนังสือรับรองผลงาน" เสมอ
+   - ฟิลด์ "รายละเอียดที่ต้องระบุ": หากพบว่าเป็นค่าว่าง "" ให้วิเคราะห์จากข้อกำหนดแล้วเขียนอธิบายสิ่งที่ต้องระบุ เช่น "ระบุยืนยันความพร้อมและอธิบายรายละเอียดการดำเนินงานตามข้อกำหนด" หรือ "แนบเอกสารหลักฐานพร้อมลงนามรับรอง" เสมอ ห้ามปล่อยว่างเด็ดขาด!
+8. ห้ามสร้างข้อความมั่วซั่ว (Gibberish) หรือข้อความซ้ำๆ เช่น 'PPPPPPPPP' หรือตัวอักษรประหลาดเด็ดขาด หากพบรายการที่มั่วซั่วไม่มีความหมาย ให้ตัดทิ้งทันที!
 
 ข้อมูลที่ได้รับ:
 - "original_text": ข้อความต้นฉบับจากเอกสาร TOR (ใช้เป็นข้อมูลอ้างอิงในการตรวจสอบ)
@@ -50,13 +54,11 @@ CRITIC_SYSTEM_PROMPT = """คุณคือผู้ตรวจสอบคุ
 
 def _parse_critic_response(response_text: str) -> dict:
     """Parses the AI Critic response, handling potential JSON issues."""
-    # Try direct parse first
     try:
         return json.loads(response_text)
     except:
         pass
 
-    # Try extracting JSON object
     try:
         obj_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if obj_match:
@@ -64,7 +66,6 @@ def _parse_critic_response(response_text: str) -> dict:
     except:
         pass
 
-    # Try extracting just the array
     try:
         arr_match = re.search(r'\[.*\]', response_text, re.DOTALL)
         if arr_match:
@@ -73,7 +74,6 @@ def _parse_critic_response(response_text: str) -> dict:
     except:
         pass
 
-    # Last resort: extract individual objects
     object_matches = re.findall(r'\{[^{}]+\}', response_text, re.DOTALL)
     valid_objs = []
     for obj_str in object_matches:
@@ -106,7 +106,6 @@ def evaluate_and_correct_checklist(original_text: str, raw_checklist: list) -> l
     # Truncate original text to fit within context limits
     ref_text = original_text[:15000]
 
-    # Select model (same priority as ai_engine)
     target_models = [
         "typhoon-v2.5-30b-a3b-instruct",
         "typhoon-v2.1-12b-instruct",
@@ -132,7 +131,7 @@ def evaluate_and_correct_checklist(original_text: str, raw_checklist: list) -> l
                         {"role": "user", "content": user_content}
                     ],
                     temperature=0.1,
-                    max_tokens=2048
+                    max_tokens=4096 # Upgraded to 4096 to prevent truncation
                 )
 
                 response_text = response.choices[0].message.content.strip()
@@ -144,7 +143,6 @@ def evaluate_and_correct_checklist(original_text: str, raw_checklist: list) -> l
 
                     print(f"[AI Critic] Round {round_num}: {corrections} corrections made, {len(new_checklist)} items returned")
 
-                    # If no corrections were needed, we're done
                     if corrections == 0:
                         print(f"[AI Critic] No corrections needed. Quality verified! ✓")
                         return new_checklist
@@ -169,7 +167,6 @@ def evaluate_and_correct_checklist(original_text: str, raw_checklist: list) -> l
 
 
 if __name__ == '__main__':
-    # Quick test
     test_checklist = [
         {
             "Status": "",
@@ -177,8 +174,8 @@ if __name__ == '__main__':
             "หมวดหมู่หลัก": "หลักการและเหุตผล",
             "หัวข้อย่อย": "หลักการและเหุตผล",
             "ข้อกำหนด / รายละเอียด (Requirement / Details)": "ตามรฐัธรรมนูญแห่งราชอาณาจักรไทย",
-            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค",
-            "รายละเอียดที่ต้องระบุ": "ระบุความเข้าใจ",
+            "ชื่อเอกสารที่ใช้ยื่น": "",
+            "รายละเอียดที่ต้องระบุ": "",
             "Comply?": "False",
             "หมายเหตุ (Remarks)": ""
         }

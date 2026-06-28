@@ -7,8 +7,10 @@ to extract structured checklist items from TOR documents.
 Architecture:
   1. Metadata Extraction (dedicated small AI call + robust text fallback)
   2. Chunked Checklist Extraction (split document into sections, call AI per chunk without dummy JSON examples)
-  3. AI Critic Self-Correction Loop
-  4. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
+  3. Bulletproof Hallucination/Gibberish Filtering (_is_valid_tor_item)
+  4. AI Critic Self-Correction Loop
+  5. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
+  6. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
 """
 import os
 import json
@@ -78,31 +80,72 @@ def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> s
     return None
 
 
+def _is_valid_tor_item(item: dict) -> bool:
+    """
+    Bulletproof validation filter to detect and destroy AI hallucination / gibberish.
+    Checks 'หมวดหมู่หลัก' and 'ข้อกำหนด / รายละเอียด (Requirement / Details)'.
+    """
+    cat = str(item.get('หมวดหมู่หลัก', '')).strip()
+    req = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
+    combined = f"{cat} {req}"
+
+    if not cat and not req:
+        return False
+
+    # 1. Check for repeating character glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd)
+    if re.search(r'([A-Za-z0-9])\1{4,}', combined):
+        print(f"[AI Engine] Dropped hallucinated repeating string: {combined[:40]}")
+        return False
+
+    # 2. Check for bizarre non-Thai / non-English characters (Cyrillic, extended Latin gibberish like Ж, ŧ, ț, ç)
+    if re.search(r'[ЖțçŧÉ¢]', combined):
+        print(f"[AI Engine] Dropped corrupted encoding/Cyrillic gibberish: {combined[:40]}")
+        return False
+
+    # 3. Must contain at least some valid Thai characters (Thai government documents are in Thai)
+    thai_chars = re.findall(r'[\u0E00-\u0E7F]', combined)
+    if len(thai_chars) < 5:
+        print(f"[AI Engine] Dropped non-Thai/gibberish item: {combined[:40]}")
+        return False
+
+    # 4. Filter out short random nonsense (e.g. 'JZ', '3h0', 'x478', 'KeNF')
+    if len(combined.strip()) < 8 and not any(kw in combined for kw in ['TOR', 'งาน', 'ซื้อ', 'จ้าง']):
+        print(f"[AI Engine] Dropped short nonsense item: {combined[:40]}")
+        return False
+
+    return True
+
+
 def _parse_json_array(text: str) -> list:
-    """Robustly parses a JSON array from AI response text."""
+    """Robustly parses a JSON array from AI response text with gibberish filtering."""
     if not text:
         return []
 
+    raw_items = []
     # Try full array parse
     try:
         arr_match = re.search(r'\[.*\]', text, re.DOTALL)
         if arr_match:
-            return json.loads(arr_match.group(0))
+            raw_items = json.loads(arr_match.group(0))
     except:
         pass
 
-    # Salvage individual objects (for truncated responses)
-    object_matches = re.findall(r'\{[^{}]+\}', text, re.DOTALL)
-    valid_objs = []
-    for obj_str in object_matches:
-        try:
-            obj = json.loads(obj_str)
-            if any(k in obj for k in ['ลำดับ', 'หมวดหมู่หลัก', 'ข้อกำหนด / รายละเอียด (Requirement / Details)']):
-                valid_objs.append(obj)
-        except:
-            pass
+    if not raw_items:
+        # Salvage individual objects (for truncated responses)
+        object_matches = re.findall(r'\{[^{}]+\}', text, re.DOTALL)
+        for obj_str in object_matches:
+            try:
+                obj = json.loads(obj_str)
+                if any(k in obj for k in ['ลำดับ', 'หมวดหมู่หลัก', 'ข้อกำหนด / รายละเอียด (Requirement / Details)']):
+                    raw_items.append(obj)
+            except:
+                pass
+
+    # Strictly filter out any gibberish / hallucinated items
+    valid_objs = [item for item in raw_items if isinstance(item, dict) and _is_valid_tor_item(item)]
+    
     if valid_objs:
-        print(f"[AI Engine] Salvaged {len(valid_objs)} objects from truncated response")
+        print(f"[AI Engine] Parsed {len(valid_objs)} valid clean objects (dropped {len(raw_items) - len(valid_objs)} invalid/gibberish)")
     return valid_objs
 
 
@@ -198,7 +241,7 @@ def _extract_metadata_from_text(text: str) -> dict:
 def _build_checklist_prompt(knowledge_section: str) -> str:
     """
     Builds the checklist extraction system prompt.
-    CRITICAL FIX: No literal JSON examples are included to strictly prevent AI from copying them.
+    CRITICAL FIX: Explicitly mandates population of doc names and details. No literal JSON examples.
     """
     prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐไทย หน้าที่ของคุณคือวิเคราะห์ข้อความส่วนหนึ่งจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดทุกข้อออกมาเป็นตาราง Checklist
 
@@ -210,13 +253,14 @@ def _build_checklist_prompt(knowledge_section: str) -> str:
 3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก (เช่น "ความเป็นมา", "วัตถุประสงค์", "คุณสมบัติของผู้ยื่นข้อเสนอ", "ขอบเขตการดำเนินงาน", "คุณลักษณะเฉพาะ", "การส่งมอบงาน")
 4. "หัวข้อย่อย": ชื่อหัวข้อย่อย
 5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง (ห้ามย่อ ห้ามสรุป ให้ใส่เนื้อหาเต็มของข้อกำหนดนั้นๆ)
-6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ต้องเตรียมยื่น (เช่น "ข้อเสนอทางเทคนิค", "หนังสือรับรองผลงาน")
-7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ
+6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ต้องเตรียมยื่น (เช่น "ข้อเสนอทางเทคนิค (Technical Proposal)", "หนังสือรับรองผลงาน", "เอกสารการจดทะเบียนนิติบุคคล", "ใบเสนอราคา") ห้ามปล่อยว่างเด็ดขาด หากไม่แน่ใจให้ใส่ "ข้อเสนอทางเทคนิค (Technical Proposal)"
+7. "รายละเอียดที่ต้องระบุ": อธิบายรายละเอียดสิ่งที่ผู้ยื่นข้อเสนอต้องเขียนหรือแนบในเอกสาร (เช่น "ระบุคำอธิบายยืนยันความพร้อมในการดำเนินงานตามข้อกำหนด", "แนบสำเนาหนังสือรับรองผลงานพร้อมรับรองสำเนาถูกต้อง", "อธิบายแผนงานและวิธีการดำเนินการอย่างละเอียด") ห้ามปล่อยว่างเด็ดขาด!
 8. "Comply?": ให้ใส่ข้อความ "False" เสมอ
 9. "หมายเหตุ (Remarks)": ให้ใส่ค่าว่าง "" เสมอ
 
 คำเตือนสำคัญ:
 - ห้ามสร้างข้อมูลสมมติขึ้นมาเองเด็ดขาด ให้สกัดจากข้อความจริงของเอกสารส่วนที่ส่งมาเท่านั้น
+- ห้ามสร้างข้อความมั่วซั่ว (Gibberish) หรือข้อความซ้ำๆ เช่น 'PPPPPPPPP' หรือตัวอักษรประหลาดเด็ดขาด
 - ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน
 - สกัดข้อกำหนดออกมาให้ครบถ้วนที่สุดเท่าที่มีในเนื้อหา"""
 
@@ -266,10 +310,12 @@ def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks:
 
 
 def _deduplicate_checklist(items: list) -> list:
-    """Removes duplicate items from combined chunks (based on ข้อกำหนด content)."""
+    """Removes duplicate items from combined chunks (based on ข้อกำหนด content) and cleans gibberish."""
     seen = set()
     unique_items = []
     for item in items:
+        if not _is_valid_tor_item(item):
+            continue
         content = item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')
         # Use first 100 chars as fingerprint to catch duplicates from chunk overlaps
         fingerprint = content[:100].strip()
@@ -281,7 +327,7 @@ def _deduplicate_checklist(items: list) -> list:
     
     removed = len(items) - len(unique_items)
     if removed > 0:
-        print(f"[AI Engine] Deduplication: removed {removed} duplicate items")
+        print(f"[AI Engine] Deduplication: removed {removed} duplicate/invalid items")
     return unique_items
 
 
@@ -323,10 +369,11 @@ def generate_tor_checklist(text_content: str) -> dict:
       1. Load Knowledge Base (RAG)
       2. Extract Metadata (dedicated small AI call + robust text fallback)
       3. Chunked Checklist Extraction (split document, call AI per chunk without dummy examples)
-      4. Deduplicate merged results
+      4. Deduplicate & filter out gibberish/hallucinations (_is_valid_tor_item)
       5. AI Critic Self-Correction Loop (safe non-truncating)
       6. Natural Hierarchical Sorting (solves out-of-order numbering e.g. 5, 7, 10, 6)
-      7. Return final result
+      7. Final Polish (populates empty 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ')
+      8. Return final result
 
     Returns:
         dict with keys: "metadata" (dict) and "checklist" (list)
@@ -361,8 +408,8 @@ def generate_tor_checklist(text_content: str) -> dict:
         print("[AI Engine] All AI extraction failed. Using direct text parsing fallback...")
         all_items = _direct_text_fallback(clean_text)
 
-    # Step 4: Deduplicate
-    print(f"[AI Engine] Step 4: Deduplicating {len(all_items)} items...")
+    # Step 4: Deduplicate & Clean Gibberish
+    print(f"[AI Engine] Step 4: Deduplicating and cleaning {len(all_items)} items...")
     all_items = _deduplicate_checklist(all_items)
 
     # Step 5: Re-number items sequentially if missing
@@ -370,17 +417,21 @@ def generate_tor_checklist(text_content: str) -> dict:
         if not item.get('ลำดับ'):
             item['ลำดับ'] = f"{idx}."
 
-    print(f"[AI Engine] Total checklist items after dedup: {len(all_items)}")
+    print(f"[AI Engine] Total checklist items after dedup and cleaning: {len(all_items)}")
 
     # Step 6: AI Critic Self-Correction
     print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
     try:
         corrected = evaluate_and_correct_checklist(clean_text, all_items)
-        if corrected and len(corrected) >= len(all_items):
-            all_items = corrected
+        # Clean critic output just in case it hallucinated
+        clean_corrected = [item for item in corrected if isinstance(item, dict) and _is_valid_tor_item(item)] if corrected else []
+        
+        # Accept critic output if it retained at least half of the valid items (allowing valid pruning)
+        if clean_corrected and len(clean_corrected) >= (len(all_items) // 2):
+            all_items = clean_corrected
             print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
         else:
-            print(f"[AI Engine] Critic returned fewer items ({len(corrected) if corrected else 0} vs {len(all_items)}). Keeping original complete items.")
+            print(f"[AI Engine] Critic returned invalid/fewer items ({len(clean_corrected)} vs {len(all_items)}). Keeping original clean items.")
     except Exception as critic_err:
         print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
 
@@ -391,6 +442,25 @@ def generate_tor_checklist(text_content: str) -> dict:
         print("[AI Engine] Sorting completed successfully.")
     except Exception as sort_err:
         print(f"[AI Engine] Sorting failed (non-critical): {sort_err}")
+
+    # Step 8: Final Polish - Ensure no empty values in critical columns
+    print("[AI Engine] Step 7: Final Polish (Ensuring required fields are populated)...")
+    for item in all_items:
+        doc = str(item.get('ชื่อเอกสารที่ใช้ยื่น', '')).strip()
+        if not doc or doc == 'None':
+            item['ชื่อเอกสารที่ใช้ยื่น'] = "ข้อเสนอทางเทคนิค (Technical Proposal)"
+            
+        detail = str(item.get('รายละเอียดที่ต้องระบุ', '')).strip()
+        if not detail or detail == 'None':
+            req_text = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
+            if any(kw in req_text for kw in ['ผลงาน', 'ประสบการณ์', 'เคย']):
+                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองผลงานและสำเนาสัญญาที่เกี่ยวข้อง พร้อมรับรองสำเนาถูกต้อง"
+            elif any(kw in req_text for kw in ['นิติบุคคล', 'จดทะเบียน', 'ทุน', 'ล้มละลาย', 'คุณสมบัติ']):
+                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองการจดทะเบียนนิติบุคคล / เอกสารหลักฐานคุณสมบัติ พร้อมลงนามรับรอง"
+            elif any(kw in req_text for kw in ['ระบบ', 'ซอฟต์แวร์', 'ฟังก์ชัน', 'เซิร์ฟเวอร์', 'ความปลอดภัย', 'สถาปัตยกรรม']):
+                item['รายละเอียดที่ต้องระบุ'] = "ระบุข้อเสนอทางเทคนิค อธิบายสถาปัตยกรรมระบบ ฟังก์ชันการทำงาน และวิธีการดำเนินงานอย่างละเอียด"
+            else:
+                item['รายละเอียดที่ต้องระบุ'] = "ระบุคำอธิบายยืนยันความพร้อมและรายละเอียดวิธีการดำเนินงานตามข้อกำหนด"
 
     return {
         "metadata": metadata,
