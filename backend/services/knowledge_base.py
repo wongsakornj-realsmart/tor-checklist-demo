@@ -199,8 +199,10 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
 
 def get_knowledge_prompt_section(kb: dict) -> str:
     """
-    Converts the Knowledge Base into a concise prompt section
-    to inject into the AI's system prompt (Dynamic RAG).
+    Converts the Knowledge Base into a concise prompt section.
+    CRITICAL FIX: We do NOT inject full JSON sample objects here, because OpenTyphoon AI
+    literally copies them and ignores the real chunks (Prompt Mimicry / Example Overfitting).
+    Instead, we inject only the structural rules, category names, and document types.
     """
     sections = []
 
@@ -211,42 +213,30 @@ def get_knowledge_prompt_section(kb: dict) -> str:
             all_section_names.add(s)
     if all_section_names:
         sections.append(
-            "หัวข้อที่พบบ่อยในเอกสาร TOR ของหน่วยงานราชการไทย:\n" +
-            ", ".join(sorted(all_section_names)[:25])
+            "หัวข้อโครงสร้างที่พบบ่อยในเอกสาร TOR ของหน่วยงานราชการไทย:\n" +
+            ", ".join(sorted(all_section_names)[:30])
         )
 
     # 2. Common category names
     cats = kb.get('category_names', [])
     if cats:
         sections.append(
-            "หมวดหมู่หลักที่ใช้จัดกลุ่มข้อกำหนด:\n" +
-            ", ".join(cats[:20])
+            "หมวดหมู่หลัก (Main Categories) ที่ใช้จัดกลุ่มข้อกำหนด (กรุณาเลือกใช้ตามความเหมาะสมของเนื้อหาจริง):\n" +
+            ", ".join(cats[:30])
         )
 
     # 3. Common document types
     docs = kb.get('document_types', [])
     if docs:
         sections.append(
-            "ชื่อเอกสารที่ใช้ยื่นที่พบบ่อย:\n" +
-            ", ".join(docs[:20])
+            "ชื่อเอกสารที่ใช้ยื่น (Document Types) ที่พบบ่อย (กรุณาเลือกใช้ตามความเหมาะสมของเนื้อหาจริง):\n" +
+            ", ".join(docs[:30])
         )
 
-    # 4. Sample checklist rows (pick 3 diverse examples from different files)
-    examples = kb.get('checklist_examples', [])
-    sample_rows = []
-    for ex in examples[:5]:
-        rows = ex.get('rows', [])
-        if rows:
-            # Pick first row and a mid-section row to show diversity
-            sample_rows.append(rows[0])
-            if len(rows) > 10:
-                sample_rows.append(rows[len(rows)//2])
-    if sample_rows:
-        # Limit to 5 diverse examples to keep prompt manageable
-        sections.append(
-            "ตัวอย่างรูปแบบการเขียนรายการ Checklist (ใช้เป็นแนวทางรูปแบบเท่านั้น ห้ามลอกเนื้อหา):\n" +
-            json.dumps(sample_rows[:5], ensure_ascii=False, indent=2)
-        )
+    # 4. Strict instruction against hallucination
+    sections.append(
+        "กฎเหล็กสำคัญ: ข้อมูลด้านบนเป็นเพียงคลังคำศัพท์และโครงสร้างอ้างอิงเท่านั้น ห้ามสร้างข้อมูลสมมติขึ้นมาเองเด็ดขาด! ให้สกัดข้อกำหนดจากเนื้อหาจริงของเอกสารที่ส่งมาในรอบนี้เท่านั้น"
+    )
 
     return "\n\n".join(sections)
 

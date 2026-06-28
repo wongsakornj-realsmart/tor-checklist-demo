@@ -5,8 +5,8 @@ Uses OpenTyphoon AI with Dynamic RAG (Knowledge Base) and AI Critic (Self-Correc
 to extract structured checklist items from TOR documents.
 
 Architecture:
-  1. Metadata Extraction (dedicated small AI call)
-  2. Chunked Checklist Extraction (split document into sections, call AI per chunk)
+  1. Metadata Extraction (dedicated small AI call + robust text fallback)
+  2. Chunked Checklist Extraction (split document into sections, call AI per chunk without dummy JSON examples)
   3. AI Critic Self-Correction Loop
 """
 import os
@@ -96,7 +96,7 @@ def _parse_json_array(text: str) -> list:
     for obj_str in object_matches:
         try:
             obj = json.loads(obj_str)
-            if any(k in obj for k in ['ลำดับ', 'หมวดหมู่หลัก', 'ข้อกำหนด']):
+            if any(k in obj for k in ['ลำดับ', 'หมวดหมู่หลัก', 'ข้อกำหนด / รายละเอียด (Requirement / Details)']):
                 valid_objs.append(obj)
         except:
             pass
@@ -119,61 +119,71 @@ def _parse_json_object(text: str) -> dict:
 
 
 # ========================================================================
-# STEP 1: Metadata Extraction (Dedicated small call)
+# STEP 1: Metadata Extraction
 # ========================================================================
 
 METADATA_SYSTEM_PROMPT = """คุณคือผู้เชี่ยวชาญด้านการวิเคราะห์เอกสาร TOR (Terms of Reference) ภาครัฐไทย
-หน้าที่ของคุณคือสกัดข้อมูลภาพรวมโครงการจากข้อความของเอกสาร TOR
+หน้าที่ของคุณคือสกัดข้อมูลภาพรวมโครงการจากข้อความของเอกสาร TOR ที่ส่งมา
 
 กรุณาสกัดข้อมูลต่อไปนี้:
-1. "project_name": ชื่อโครงการ/ชื่อเรื่องของงาน (เช่น "โครงการจ้างพัฒนาระบบ..." หรือ "งานจ้างบริการ...")
-2. "client_name": ชื่อหน่วยงานเจ้าของโครงการ (เช่น "สำนักงานพัฒนารัฐบาลดิจิทัล" หรือ "กรมบัญชีกลาง")
+1. "project_name": ชื่อโครงการหรือชื่อเรื่องของงานที่จัดซื้อจัดจ้าง
+2. "client_name": ชื่อหน่วยงานเจ้าของโครงการ (เช่น กรม, กอง, สำนักงาน, การ, มหาวิทยาลัย, บริษัท)
 3. "dateline": วันที่สิ้นสุดการยื่นข้อเสนอ หรือวันที่ยื่นซอง (ถ้าไม่มีระบุในเอกสาร ให้ใส่ "")
 
-ตอบกลับเป็น JSON Object เท่านั้น:
-{"project_name": "...", "client_name": "...", "dateline": "..."}
+กฎเหล็กสำคัญ:
+- ห้ามตอบกลับเป็น "..." หรือข้อความสมมติเด็ดขาด
+- ให้ดึงข้อความชื่อโครงการจริง และชื่อหน่วยงานจริง จากเนื้อหาเอกสารที่ส่งมาเท่านั้น!
 
-สำคัญ: สกัดจากเนื้อหาจริงของเอกสารเท่านั้น ห้ามสมมติข้อมูลขึ้นมา"""
+ตอบกลับเป็น JSON Object เท่านั้น โดยมีโครงสร้างดังนี้:
+{
+  "project_name": "ชื่อโครงการจริงจากเอกสาร",
+  "client_name": "ชื่อหน่วยงานจริงจากเอกสาร",
+  "dateline": "วันที่ยื่นซองจริงจากเอกสาร (ถ้ามี)"
+}"""
 
 
 def _extract_metadata(text_content: str) -> dict:
-    """Extracts project metadata using a dedicated small AI call."""
+    """Extracts project metadata using AI with robust text parsing fallback."""
     print("[AI Engine] Extracting metadata...")
-    # Use first 5000 chars (metadata is always at the beginning)
-    short_text = text_content[:5000]
+    short_text = text_content[:6000] # Inspect first 6000 chars
 
     response_text = _call_ai(METADATA_SYSTEM_PROMPT, f"เอกสาร TOR:\n\n{short_text}", max_tokens=512)
     meta = _parse_json_object(response_text)
 
-    if meta:
-        print(f"[AI Engine] Metadata extracted: project={meta.get('project_name', '')[:50]}, client={meta.get('client_name', '')[:30]}")
-    else:
-        # Fallback: try to extract from text directly
-        print("[AI Engine] AI metadata extraction failed, using text parsing fallback...")
-        meta = _extract_metadata_from_text(text_content)
+    # Robust verification against AI literal copying of placeholders
+    p_name = meta.get('project_name', '').strip()
+    c_name = meta.get('client_name', '').strip()
 
+    if not p_name or p_name in ["...", "ชื่อโครงการจริงจากเอกสาร", ""]:
+        print("[AI Engine] AI returned placeholder/empty project_name. Using robust text fallback...")
+        text_meta = _extract_metadata_from_text(text_content)
+        p_name = text_meta.get('project_name', p_name)
+        if not c_name or c_name in ["...", "ชื่อหน่วยงานจริงจากเอกสาร", ""]:
+            c_name = text_meta.get('client_name', c_name)
+
+    print(f"[AI Engine] Final Metadata: project='{p_name[:50]}', client='{c_name[:30]}'")
     return {
-        'project_name': meta.get('project_name', ''),
-        'client_name': meta.get('client_name', ''),
-        'dateline': meta.get('dateline', '')
+        'project_name': p_name,
+        'client_name': c_name,
+        'dateline': meta.get('dateline', '') if meta.get('dateline') not in ["...", "วันที่ยื่นซองจริงจากเอกสาร (ถ้ามี)"] else ""
     }
 
 
 def _extract_metadata_from_text(text: str) -> dict:
-    """Fallback: extract metadata directly from text patterns."""
-    lines = [l.strip() for l in text[:5000].split('\n') if l.strip()]
+    """Bulletproof fallback: extract metadata directly from text patterns."""
+    lines = [l.strip() for l in text[:6000].split('\n') if l.strip()]
     project_name = ""
     client_name = ""
 
-    for line in lines[:30]:
+    for line in lines[:40]:
         # Project name patterns
         if not project_name:
-            if any(kw in line for kw in ['โครงการ', 'เรื่อง', 'งานจ้าง', 'งานซื้อ', 'TOR']):
-                if len(line) > 10:
+            if any(kw in line for kw in ['โครงการ', 'เรื่อง', 'งานจ้าง', 'งานซื้อ', 'ประกวดราคา', 'TOR']):
+                if len(line) > 10 and not line.startswith('1.'):
                     project_name = line[:200]
         # Client name patterns
         if not client_name:
-            if any(kw in line for kw in ['สำนักงาน', 'กรม', 'กอง', 'การ', 'มหาวิทยาลัย', 'จัดทำโดย']):
+            if any(kw in line for kw in ['สำนักงาน', 'กรม', 'กอง', 'การ', 'มหาวิทยาลัย', 'กระทรวง', 'สถาบัน', 'บริษัท', 'จัดทำโดย']):
                 if len(line) > 5:
                     client_name = line[:100]
 
@@ -185,28 +195,34 @@ def _extract_metadata_from_text(text: str) -> dict:
 # ========================================================================
 
 def _build_checklist_prompt(knowledge_section: str) -> str:
-    """Builds the checklist extraction system prompt with RAG knowledge."""
+    """
+    Builds the checklist extraction system prompt.
+    CRITICAL FIX: No literal JSON examples are included to strictly prevent AI from copying them.
+    """
     prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐไทย หน้าที่ของคุณคือวิเคราะห์ข้อความส่วนหนึ่งจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดทุกข้อออกมาเป็นตาราง Checklist
 
-สิ่งสำคัญที่สุด: คุณต้องสกัดข้อกำหนดทุกข้อที่ปรากฏในเอกสาร ห้ามข้ามหรือละเว้นข้อใดข้อหนึ่ง ทุกย่อหน้าที่มีเนื้อหาเกี่ยวกับข้อกำหนด ขอบเขตงาน คุณสมบัติ เงื่อนไข หรือรายละเอียดทางเทคนิค ต้องถูกสกัดออกมาเป็นรายการ
+สิ่งสำคัญที่สุด: คุณต้องสกัดข้อกำหนดทุกข้อที่ปรากฏในเอกสารส่วนที่ส่งมา ห้ามข้ามหรือละเว้นข้อใดข้อหนึ่ง ทุกย่อหน้าที่มีเนื้อหาเกี่ยวกับข้อกำหนด ขอบเขตงาน คุณสมบัติ เงื่อนไข หรือรายละเอียดทางเทคนิค ต้องถูกสกัดออกมาเป็นรายการแยกกันทั้งหมด (ควรสกัดให้ได้หลายสิบข้อกำหนดตามเนื้อหาจริง)
 
-แปลงเป็น JSON Array โดยแต่ละรายการมีฟิลด์:
-1. "Status": ""
-2. "ลำดับ": หมายเลขลำดับตามเอกสารต้นฉบับ (เช่น "1.", "1.1", "2.", "ก.", "1)")
-3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก (เช่น "ความเป็นมา", "วัตถุประสงค์", "คุณสมบัติของผู้ยื่นข้อเสนอ", "ขอบเขตการดำเนินงาน", "คุณลักษณะเฉพาะ")
+กรุณาแปลงข้อมูลเป็น JSON Array โดยแต่ละรายการ (Object) จะต้องประกอบด้วยฟิลด์ดังต่อไปนี้เท่านั้น:
+1. "Status": ให้ใส่ค่าว่าง "" เสมอ
+2. "ลำดับ": หมายเลขลำดับข้อกำหนดตามเอกสารต้นฉบับ (เช่น "1.", "1.1", "2.", "ก.", "1)")
+3. "หมวดหมู่หลัก": ชื่อหมวดหมู่หลัก (เช่น "ความเป็นมา", "วัตถุประสงค์", "คุณสมบัติของผู้ยื่นข้อเสนอ", "ขอบเขตการดำเนินงาน", "คุณลักษณะเฉพาะ", "การส่งมอบงาน")
 4. "หัวข้อย่อย": ชื่อหัวข้อย่อย
-5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง (ห้ามย่อ ห้ามสรุป ให้ใส่เนื้อหาเต็ม)
-6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ต้องเตรียมยื่น
+5. "ข้อกำหนด / รายละเอียด (Requirement / Details)": เนื้อหาข้อกำหนดโดยละเอียดจากเอกสารจริง (ห้ามย่อ ห้ามสรุป ให้ใส่เนื้อหาเต็มของข้อกำหนดนั้นๆ)
+6. "ชื่อเอกสารที่ใช้ยื่น": ชื่อเอกสารที่ต้องเตรียมยื่น (เช่น "ข้อเสนอทางเทคนิค", "หนังสือรับรองผลงาน")
 7. "รายละเอียดที่ต้องระบุ": สิ่งที่ต้องระบุในเอกสารนั้นๆ
-8. "Comply?": "False"
-9. "หมายเหตุ (Remarks)": ""
+8. "Comply?": ให้ใส่ข้อความ "False" เสมอ
+9. "หมายเหตุ (Remarks)": ให้ใส่ค่าว่าง "" เสมอ
 
-คำเตือน: ตอบกลับเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน ให้สกัดทุกข้อกำหนดอย่างครบถ้วน"""
+คำเตือนสำคัญ:
+- ห้ามสร้างข้อมูลสมมติขึ้นมาเองเด็ดขาด ให้สกัดจากข้อความจริงของเอกสารส่วนที่ส่งมาเท่านั้น
+- ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน
+- สกัดข้อกำหนดออกมาให้ครบถ้วนที่สุดเท่าที่มีในเนื้อหา"""
 
     if knowledge_section:
         prompt += f"""
 
-=== ความรู้อ้างอิง (ใช้เป็นแนวทางรูปแบบเท่านั้น ห้ามลอกเนื้อหา) ===
+=== ความรู้อ้างอิงจากต้นแบบ (ใช้เป็นคลังคำศัพท์และแนวทางเท่านั้น ห้ามลอกเนื้อหา) ===
 {knowledge_section}
 === จบส่วนความรู้อ้างอิง ==="""
 
@@ -225,7 +241,6 @@ def _split_into_chunks(text: str) -> list:
 
         # Try to split at a paragraph break
         if end < len(text):
-            # Look for a good break point (newline, period, etc.)
             break_point = text.rfind('\n', start + CHUNK_SIZE - 2000, end)
             if break_point > start:
                 end = break_point
@@ -254,7 +269,6 @@ def _deduplicate_checklist(items: list) -> list:
     seen = set()
     unique_items = []
     for item in items:
-        # Create a fingerprint from key content
         content = item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')
         # Use first 100 chars as fingerprint to catch duplicates from chunk overlaps
         fingerprint = content[:100].strip()
@@ -262,7 +276,7 @@ def _deduplicate_checklist(items: list) -> list:
             seen.add(fingerprint)
             unique_items.append(item)
         elif not fingerprint:
-            unique_items.append(item)  # Keep items without content (shouldn't happen)
+            unique_items.append(item)
     
     removed = len(items) - len(unique_items)
     if removed > 0:
@@ -280,10 +294,10 @@ def generate_tor_checklist(text_content: str) -> dict:
 
     Pipeline:
       1. Load Knowledge Base (RAG)
-      2. Extract Metadata (dedicated small AI call)
-      3. Chunked Checklist Extraction (split document, call AI per chunk)
+      2. Extract Metadata (dedicated small AI call + robust text fallback)
+      3. Chunked Checklist Extraction (split document, call AI per chunk without dummy examples)
       4. Deduplicate merged results
-      5. AI Critic Self-Correction Loop
+      5. AI Critic Self-Correction Loop (safe non-truncating)
       6. Return final result
 
     Returns:
@@ -334,9 +348,11 @@ def generate_tor_checklist(text_content: str) -> dict:
     print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
     try:
         corrected = evaluate_and_correct_checklist(clean_text, all_items)
-        if corrected and len(corrected) > 0:
+        if corrected and len(corrected) >= len(all_items):
             all_items = corrected
             print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
+        else:
+            print(f"[AI Engine] Critic returned fewer items ({len(corrected) if corrected else 0} vs {len(all_items)}). Keeping original complete items.")
     except Exception as critic_err:
         print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
 
@@ -347,18 +363,18 @@ def generate_tor_checklist(text_content: str) -> dict:
 
 
 def _direct_text_fallback(clean_text: str) -> list:
-    """Fallback when all AI models fail."""
+    """Fallback when all AI models fail: extracts all valid matching lines."""
     lines = [l.strip() for l in clean_text.split('\n') if l.strip() and len(l.strip()) > 15]
     extracted = []
     keywords = ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต",
                  "โครงการ", "ระบบ", "คุณสมบัติ", "เงื่อนไข", "การดำเนินงาน",
-                 "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา"]
+                 "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา", "จัดทำ"]
     for line in lines:
         if any(kw in line for kw in keywords):
             extracted.append(line)
 
     if not extracted:
-        extracted = lines[:20]
+        extracted = lines[:50]
 
     result = []
     for idx, req in enumerate(extracted, 1):
@@ -366,11 +382,12 @@ def _direct_text_fallback(clean_text: str) -> list:
             "Status": "",
             "ลำดับ": f"{idx}.",
             "หมวดหมู่หลัก": "ข้อกำหนดโครงการ (Direct Extract)",
-            "หัวข้อย่อย": "",
+            "หัวข้อย่อย": "รายละเอียดข้อกำหนด",
             "ข้อกำหนด / รายละเอียด (Requirement / Details)": req,
-            "ชื่อเอกสารที่ใช้ยื่น": "",
-            "รายละเอียดที่ต้องระบุ": "",
+            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
+            "รายละเอียดที่ต้องระบุ": f"ยืนยันความพร้อมตามข้อกำหนด",
             "Comply?": "False",
             "หมายเหตุ (Remarks)": "AI Fallback"
         })
+    print(f"[AI Engine] Direct text fallback extracted {len(result)} items")
     return result
