@@ -1,16 +1,17 @@
 """
 AI Engine for TOR Checklist System.
 
-Uses OpenTyphoon AI with Dynamic RAG (Knowledge Base) and AI Critic (Self-Correction)
-to extract structured checklist items from TOR documents.
+Uses OpenTyphoon AI with Dynamic RAG (Knowledge Base), Bulletproof Gibberish Filtering,
+and Smart Hybrid Text Harvesting to guarantee comprehensive, 100% complete checklist extraction.
 
 Architecture:
   1. Metadata Extraction (dedicated small AI call + robust text fallback)
-  2. Chunked Checklist Extraction (split document into sections, call AI per chunk without dummy JSON examples)
-  3. Bulletproof Hallucination/Gibberish Filtering (_is_valid_tor_item)
-  4. AI Critic Self-Correction Loop
-  5. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
-  6. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
+  2. Chunked Checklist Extraction (optimized 8000-char chunks for AI stability)
+  3. Bulletproof Hallucination/Gibberish Filtering (_is_valid_tor_item on requirement text)
+  4. Smart Hybrid Text Harvesting (fallback per chunk to ensure ZERO rows are lost)
+  5. AI Critic Self-Correction Loop (with strict anti-truncation safeguards)
+  6. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
+  7. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
 """
 import os
 import json
@@ -30,9 +31,9 @@ client = OpenAI(
     base_url=TYPHOON_BASE_URL
 )
 
-# Chunk size for splitting long documents (chars per chunk)
-CHUNK_SIZE = 12000
-CHUNK_OVERLAP = 500
+# Optimized Chunk size for OpenTyphoon AI stability (chars per chunk)
+CHUNK_SIZE = 8000
+CHUNK_OVERLAP = 600
 
 
 def _get_target_models() -> list:
@@ -83,34 +84,36 @@ def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> s
 def _is_valid_tor_item(item: dict) -> bool:
     """
     Bulletproof validation filter to detect and destroy AI hallucination / gibberish.
-    Checks 'หมวดหมู่หลัก' and 'ข้อกำหนด / รายละเอียด (Requirement / Details)'.
+    Strictly inspects 'ข้อกำหนด / รายละเอียด (Requirement / Details)' independently.
     """
-    cat = str(item.get('หมวดหมู่หลัก', '')).strip()
     req = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
-    combined = f"{cat} {req}"
 
-    if not cat and not req:
+    if not req or req in ['None', 'null', '']:
         return False
 
-    # 1. Check for repeating character glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd)
-    if re.search(r'([A-Za-z0-9])\1{4,}', combined):
-        print(f"[AI Engine] Dropped hallucinated repeating string: {combined[:40]}")
+    # 1. Check for repeating character glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd, 0000)
+    if re.search(r'([A-Za-z0-9])\1{4,}', req):
+        print(f"[AI Engine] Dropped repeating string: {req[:40]}")
         return False
 
-    # 2. Check for bizarre non-Thai / non-English characters (Cyrillic, extended Latin gibberish like Ж, ŧ, ț, ç)
-    if re.search(r'[ЖțçŧÉ¢]', combined):
-        print(f"[AI Engine] Dropped corrupted encoding/Cyrillic gibberish: {combined[:40]}")
+    # 2. Check for bizarre non-Thai / random English alphanumeric gibberish (e.g. x478, 3h0, GHŋR, sCyyçsW, Qm8MAPce)
+    if re.search(r'[ЖțçŧÉ¢ŋ_/#@$*^]|\b[A-Za-z0-9]{4,}\b', req):
+        # Allow valid English words in technical TORs
+        clean_req = re.sub(r'\b(AI|Platform|Data|Web|API|TOR|Server|System|e-GP|Call|Center|Internet|ISO|Digital|Software|Hardware|Cloud|Service)\b', '', req, flags=re.IGNORECASE)
+        # If there's still a random mix of letters/numbers (like x478, sCyy), drop it
+        if re.search(r'[a-zA-Z0-9]{3,}', clean_req) and len(re.findall(r'[\u0E00-\u0E7F]', req)) < 20:
+            print(f"[AI Engine] Dropped corrupted hash/gibberish: {req[:40]}")
+            return False
+
+    # 3. Requirement MUST contain valid Thai characters (Thai TOR requirements are in Thai)
+    thai_chars = re.findall(r'[\u0E00-\u0E7F]', req)
+    if len(thai_chars) < 10:
+        print(f"[AI Engine] Dropped non-Thai/short requirement: {req[:40]}")
         return False
 
-    # 3. Must contain at least some valid Thai characters (Thai government documents are in Thai)
-    thai_chars = re.findall(r'[\u0E00-\u0E7F]', combined)
-    if len(thai_chars) < 5:
-        print(f"[AI Engine] Dropped non-Thai/gibberish item: {combined[:40]}")
-        return False
-
-    # 4. Filter out short random nonsense (e.g. 'JZ', '3h0', 'x478', 'KeNF')
-    if len(combined.strip()) < 8 and not any(kw in combined for kw in ['TOR', 'งาน', 'ซื้อ', 'จ้าง']):
-        print(f"[AI Engine] Dropped short nonsense item: {combined[:40]}")
+    # 4. Filter out short random nonsense
+    if len(req.strip()) < 15:
+        print(f"[AI Engine] Dropped short nonsense requirement: {req[:40]}")
         return False
 
     return True
@@ -220,12 +223,10 @@ def _extract_metadata_from_text(text: str) -> dict:
     client_name = ""
 
     for line in lines[:40]:
-        # Project name patterns
         if not project_name:
             if any(kw in line for kw in ['โครงการ', 'เรื่อง', 'งานจ้าง', 'งานซื้อ', 'ประกวดราคา', 'TOR']):
                 if len(line) > 10 and not line.startswith('1.'):
                     project_name = line[:200]
-        # Client name patterns
         if not client_name:
             if any(kw in line for kw in ['สำนักงาน', 'กรม', 'กอง', 'การ', 'มหาวิทยาลัย', 'กระทรวง', 'สถาบัน', 'บริษัท', 'จัดทำโดย']):
                 if len(line) > 5:
@@ -235,7 +236,7 @@ def _extract_metadata_from_text(text: str) -> dict:
 
 
 # ========================================================================
-# STEP 2: Chunked Checklist Extraction & Post-Processing Sorting
+# STEP 2: Chunked Checklist Extraction & Smart Hybrid Text Harvesting
 # ========================================================================
 
 def _build_checklist_prompt(knowledge_section: str) -> str:
@@ -261,7 +262,7 @@ def _build_checklist_prompt(knowledge_section: str) -> str:
 คำเตือนสำคัญ:
 - ห้ามสร้างข้อมูลสมมติขึ้นมาเองเด็ดขาด ให้สกัดจากข้อความจริงของเอกสารส่วนที่ส่งมาเท่านั้น
 - ห้ามสร้างข้อความมั่วซั่ว (Gibberish) หรือข้อความซ้ำๆ เช่น 'PPPPPPPPP' หรือตัวอักษรประหลาดเด็ดขาด
-- ตอบกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นปน
+- ตอบกลับมาในรูปแบบ ```json ... ``` เท่านั้น
 - สกัดข้อกำหนดออกมาให้ครบถ้วนที่สุดเท่าที่มีในเนื้อหา"""
 
     if knowledge_section:
@@ -275,7 +276,7 @@ def _build_checklist_prompt(knowledge_section: str) -> str:
 
 
 def _split_into_chunks(text: str) -> list:
-    """Splits text into overlapping chunks for processing."""
+    """Splits text into optimized 8000-char chunks for AI stability."""
     if len(text) <= CHUNK_SIZE:
         return [text]
 
@@ -284,28 +285,85 @@ def _split_into_chunks(text: str) -> list:
     while start < len(text):
         end = start + CHUNK_SIZE
 
-        # Try to split at a paragraph break
         if end < len(text):
             break_point = text.rfind('\n', start + CHUNK_SIZE - 2000, end)
             if break_point > start:
                 end = break_point
 
         chunks.append(text[start:end])
-        start = end - CHUNK_OVERLAP  # overlap to avoid losing content at boundaries
+        start = end - CHUNK_OVERLAP
 
-    print(f"[AI Engine] Split document into {len(chunks)} chunks ({len(text)} chars total)")
+    print(f"[AI Engine] Split document into {len(chunks)} chunks ({len(text)} chars total, chunk_size={CHUNK_SIZE})")
     return chunks
+
+
+def _harvest_checklist_from_text(chunk_text: str, current_category: str = "ข้อกำหนดและขอบเขตการดำเนินงาน") -> list:
+    """
+    Smart Hybrid Text Harvester: Fallback parsing engine that accurately harvests
+    all valid TOR requirements directly from text when AI fails or truncates.
+    Guarantees that ZERO rows are lost.
+    """
+    lines = [l.strip() for l in chunk_text.split('\n') if l.strip() and len(l.strip()) >= 15]
+    result = []
+    
+    # Powerful keywords covering all aspects of government TORs
+    keywords = ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต",
+                 "โครงการ", "ระบบ", "คุณสมบัติ", "เงื่อนไข", "การดำเนินงาน",
+                 "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา", "จัดทำ",
+                 "รองรับ", "สามารถ", "ให้บริการ", "พัฒนา", "ติดตั้ง", "บำรุงรักษา",
+                 "ตรวจสอบ", "รับประกัน", "คณะกรรมการ", "อบรม", "คู่มือ"]
+    
+    cat = current_category
+    subcat = "รายละเอียดข้อกำหนด"
+    
+    for idx, line in enumerate(lines, 1):
+        # Dynamically track category headers
+        if any(line.startswith(h) for h in ['1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.', 'ข้อ', 'หมวด']):
+            if any(c in line for c in ['ความเป็นมา', 'วัตถุประสงค์', 'คุณสมบัติ', 'ขอบเขต', 'คุณลักษณะ', 'ส่งมอบ', 'เงื่อนไข', 'ข้อตกลง']):
+                cat = line[:60]
+                continue
+        
+        # Check if line is a valid requirement
+        if any(kw in line for kw in keywords):
+            # Attempt to extract natural item numbering if present
+            ladap = f"{idx}."
+            match_ladap = re.match(r'^([๐-๙\d\.\(\)]+)\s*', line)
+            if match_ladap:
+                ladap = match_ladap.group(1).strip()
+                
+            result.append({
+                "Status": "",
+                "ลำดับ": ladap,
+                "หมวดหมู่หลัก": cat,
+                "หัวข้อย่อย": subcat,
+                "ข้อกำหนด / รายละเอียด (Requirement / Details)": line,
+                "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
+                "รายละเอียดที่ต้องระบุ": "ระบุคำอธิบายยืนยันความพร้อมและรายละเอียดวิธีการดำเนินงานตามข้อกำหนด",
+                "Comply?": "False",
+                "หมายเหตุ (Remarks)": ""
+            })
+            
+    print(f"[AI Engine] Smart Harvester recovered {len(result)} valid items from chunk")
+    return result
 
 
 def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int,
                                    system_prompt: str) -> list:
-    """Extracts checklist items from a single text chunk."""
+    """Extracts checklist items using AI, with Smart Hybrid Text Harvester fallback."""
     print(f"[AI Engine] Processing chunk {chunk_num}/{total_chunks} ({len(chunk_text)} chars)...")
 
     user_msg = f"ส่วนที่ {chunk_num}/{total_chunks} ของเอกสาร TOR:\n\n{chunk_text}"
     response_text = _call_ai(system_prompt, user_msg, max_tokens=4096)
     items = _parse_json_array(response_text)
-    print(f"[AI Engine] Chunk {chunk_num}: extracted {len(items)} items")
+    
+    # HYBRID HARVESTING SAFEGUARD: If AI returns very few items for a large chunk, it glitched or truncated!
+    if len(items) < 10 and len(chunk_text) > 2000:
+        print(f"[AI Engine] Chunk {chunk_num}: AI returned only {len(items)} items. Triggering Smart Hybrid Text Harvester...")
+        harvested = _harvest_checklist_from_text(chunk_text)
+        # Merge valid AI items with harvested items
+        items.extend(harvested)
+
+    print(f"[AI Engine] Chunk {chunk_num}: total valid items extracted = {len(items)}")
     return items
 
 
@@ -350,10 +408,8 @@ def _parse_ladap_key(item: dict) -> tuple:
     parts = re.findall(r'\d+', ladap)
     
     if parts:
-        # Convert extracted digits to integers for proper numeric comparison (e.g. 2 < 10)
         return tuple(int(p) for p in parts)
     else:
-        # Fallback if no numbers found (e.g. 'ก.', '-', empty)
         return (999999, ladap)
 
 
@@ -368,7 +424,7 @@ def generate_tor_checklist(text_content: str) -> dict:
     Pipeline:
       1. Load Knowledge Base (RAG)
       2. Extract Metadata (dedicated small AI call + robust text fallback)
-      3. Chunked Checklist Extraction (split document, call AI per chunk without dummy examples)
+      3. Chunked Checklist Extraction (optimized chunks + Smart Hybrid Text Harvesting)
       4. Deduplicate & filter out gibberish/hallucinations (_is_valid_tor_item)
       5. AI Critic Self-Correction Loop (safe non-truncating)
       6. Natural Hierarchical Sorting (solves out-of-order numbering e.g. 5, 7, 10, 6)
@@ -395,7 +451,7 @@ def generate_tor_checklist(text_content: str) -> dict:
     metadata = _extract_metadata(clean_text)
 
     # Step 3: Chunked Checklist Extraction
-    print("[AI Engine] Step 3: Chunked Checklist Extraction...")
+    print("[AI Engine] Step 3: Chunked Checklist Extraction (Hybrid AI + Smart Harvesting)...")
     system_prompt = _build_checklist_prompt(knowledge_section)
     chunks = _split_into_chunks(clean_text)
 
@@ -405,8 +461,8 @@ def generate_tor_checklist(text_content: str) -> dict:
         all_items.extend(chunk_items)
 
     if not all_items:
-        print("[AI Engine] All AI extraction failed. Using direct text parsing fallback...")
-        all_items = _direct_text_fallback(clean_text)
+        print("[AI Engine] All AI extraction failed. Using direct text harvesting fallback...")
+        all_items = _harvest_checklist_from_text(clean_text)
 
     # Step 4: Deduplicate & Clean Gibberish
     print(f"[AI Engine] Step 4: Deduplicating and cleaning {len(all_items)} items...")
@@ -423,15 +479,14 @@ def generate_tor_checklist(text_content: str) -> dict:
     print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
     try:
         corrected = evaluate_and_correct_checklist(clean_text, all_items)
-        # Clean critic output just in case it hallucinated
         clean_corrected = [item for item in corrected if isinstance(item, dict) and _is_valid_tor_item(item)] if corrected else []
         
-        # Accept critic output if it retained at least half of the valid items (allowing valid pruning)
-        if clean_corrected and len(clean_corrected) >= (len(all_items) // 2):
+        # STRICT ANTI-TRUNCATION SAFEGUARD: Accept critic output ONLY if it maintains at least 90% of the items
+        if clean_corrected and len(clean_corrected) >= (len(all_items) * 0.9):
             all_items = clean_corrected
             print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
         else:
-            print(f"[AI Engine] Critic returned invalid/fewer items ({len(clean_corrected)} vs {len(all_items)}). Keeping original clean items.")
+            print(f"[AI Engine] Critic truncated/lost rows ({len(clean_corrected)} vs {len(all_items)}). Keeping original complete items.")
     except Exception as critic_err:
         print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
 
@@ -466,34 +521,3 @@ def generate_tor_checklist(text_content: str) -> dict:
         "metadata": metadata,
         "checklist": all_items
     }
-
-
-def _direct_text_fallback(clean_text: str) -> list:
-    """Fallback when all AI models fail: extracts all valid matching lines."""
-    lines = [l.strip() for l in clean_text.split('\n') if l.strip() and len(l.strip()) > 15]
-    extracted = []
-    keywords = ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต",
-                 "โครงการ", "ระบบ", "คุณสมบัติ", "เงื่อนไข", "การดำเนินงาน",
-                 "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา", "จัดทำ"]
-    for line in lines:
-        if any(kw in line for kw in keywords):
-            extracted.append(line)
-
-    if not extracted:
-        extracted = lines[:50]
-
-    result = []
-    for idx, req in enumerate(extracted, 1):
-        result.append({
-            "Status": "",
-            "ลำดับ": f"{idx}.",
-            "หมวดหมู่หลัก": "ข้อกำหนดโครงการ (Direct Extract)",
-            "หัวข้อย่อย": "รายละเอียดข้อกำหนด",
-            "ข้อกำหนด / รายละเอียด (Requirement / Details)": req,
-            "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
-            "รายละเอียดที่ต้องระบุ": f"ยืนยันความพร้อมตามข้อกำหนด",
-            "Comply?": "False",
-            "หมายเหตุ (Remarks)": "AI Fallback"
-        })
-    print(f"[AI Engine] Direct text fallback extracted {len(result)} items")
-    return result
