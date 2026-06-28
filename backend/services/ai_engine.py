@@ -8,6 +8,7 @@ Architecture:
   1. Metadata Extraction (dedicated small AI call + robust text fallback)
   2. Chunked Checklist Extraction (split document into sections, call AI per chunk without dummy JSON examples)
   3. AI Critic Self-Correction Loop
+  4. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
 """
 import os
 import json
@@ -191,7 +192,7 @@ def _extract_metadata_from_text(text: str) -> dict:
 
 
 # ========================================================================
-# STEP 2: Chunked Checklist Extraction
+# STEP 2: Chunked Checklist Extraction & Post-Processing Sorting
 # ========================================================================
 
 def _build_checklist_prompt(knowledge_section: str) -> str:
@@ -284,6 +285,32 @@ def _deduplicate_checklist(items: list) -> list:
     return unique_items
 
 
+def _parse_ladap_key(item: dict) -> tuple:
+    """
+    Converts a 'ลำดับ' string into a robust tuple of integers/strings for natural hierarchical sorting.
+    Example: '1.2' -> (1, 2)
+             '10.1' -> (10, 1)
+             '2' -> (2,)
+             'ข้อ 6' -> (6,)
+    Ensures that items sort naturally (e.g., 5, 6, 7, 10 instead of 10, 5, 6, 7).
+    """
+    ladap = str(item.get('ลำดับ', '')).strip()
+    
+    # Convert Thai numerals to Arabic numerals
+    thai_to_arabic = str.maketrans('๐๑๒๓๔๕๖๗๘๙', '0123456789')
+    ladap = ladap.translate(thai_to_arabic)
+    
+    # Extract all numerical parts using regex
+    parts = re.findall(r'\d+', ladap)
+    
+    if parts:
+        # Convert extracted digits to integers for proper numeric comparison (e.g. 2 < 10)
+        return tuple(int(p) for p in parts)
+    else:
+        # Fallback if no numbers found (e.g. 'ก.', '-', empty)
+        return (999999, ladap)
+
+
 # ========================================================================
 # MAIN ENTRY POINT
 # ========================================================================
@@ -298,7 +325,8 @@ def generate_tor_checklist(text_content: str) -> dict:
       3. Chunked Checklist Extraction (split document, call AI per chunk without dummy examples)
       4. Deduplicate merged results
       5. AI Critic Self-Correction Loop (safe non-truncating)
-      6. Return final result
+      6. Natural Hierarchical Sorting (solves out-of-order numbering e.g. 5, 7, 10, 6)
+      7. Return final result
 
     Returns:
         dict with keys: "metadata" (dict) and "checklist" (list)
@@ -337,7 +365,7 @@ def generate_tor_checklist(text_content: str) -> dict:
     print(f"[AI Engine] Step 4: Deduplicating {len(all_items)} items...")
     all_items = _deduplicate_checklist(all_items)
 
-    # Step 5: Re-number items sequentially
+    # Step 5: Re-number items sequentially if missing
     for idx, item in enumerate(all_items, 1):
         if not item.get('ลำดับ'):
             item['ลำดับ'] = f"{idx}."
@@ -355,6 +383,14 @@ def generate_tor_checklist(text_content: str) -> dict:
             print(f"[AI Engine] Critic returned fewer items ({len(corrected) if corrected else 0} vs {len(all_items)}). Keeping original complete items.")
     except Exception as critic_err:
         print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
+
+    # Step 7: Natural Hierarchical Sorting by ลำดับ
+    print("[AI Engine] Step 6: Natural Hierarchical Sorting by ลำดับ...")
+    try:
+        all_items.sort(key=_parse_ladap_key)
+        print("[AI Engine] Sorting completed successfully.")
+    except Exception as sort_err:
+        print(f"[AI Engine] Sorting failed (non-critical): {sort_err}")
 
     return {
         "metadata": metadata,
