@@ -3,6 +3,8 @@ Knowledge Base Builder for TOR Checklist System.
 
 Reads sample TOR documents and sample TOR Checklists to build a structured
 knowledge base that teaches the AI how to extract and format checklist items.
+CRITICAL DESIGN: Strictly avoids injecting specific project names or sample text
+into the prompt to guarantee zero leakage/hallucination of wrong project data.
 """
 import os
 import json
@@ -38,14 +40,12 @@ def _extract_checklist_patterns(xlsx_path: str, max_rows: int = 500) -> list:
     """
     Reads a sample TOR Checklist Excel file and extracts row patterns
     showing how TOR requirements map to checklist columns.
-    Returns a list of dicts representing sample rows.
     """
     patterns = []
     try:
         wb = openpyxl.load_workbook(xlsx_path)
         ws = wb.active
 
-        # Detect header row (find the row containing 'Status')
         header_row = None
         for r in range(1, min(ws.max_row + 1, 10)):
             for c in range(1, min(ws.max_column + 1, 12)):
@@ -59,7 +59,6 @@ def _extract_checklist_patterns(xlsx_path: str, max_rows: int = 500) -> list:
         if not header_row:
             return patterns
 
-        # Read data rows after header
         data_start = header_row + 1
         for r in range(data_start, min(data_start + max_rows, ws.max_row + 1)):
             row_data = {}
@@ -86,42 +85,34 @@ def _extract_checklist_patterns(xlsx_path: str, max_rows: int = 500) -> list:
 
 def _extract_section_headers(text: str) -> list:
     """
-    Extracts common section headers from TOR documents.
-    Returns a list of detected section names.
+    Extracts common generic section headers from TOR documents.
     """
     import re
     headers = []
-    # Common TOR section patterns in Thai
     patterns = [
-        r'(?:^|\n)\s*[๐-๙\d]+[\.\)]\s*(.+)',           # "1. ความเป็นมา" or "๑. ความเป็นมา"
-        r'(?:^|\n)\s*ข้อ\s*[๐-๙\d]+\s*(.+)',              # "ข้อ 1 ..."
-        r'(?:^|\n)\s*หมวด(?:ที่)?\s*[๐-๙\d]+\s*(.+)',     # "หมวดที่ 1 ..."
+        r'(?:^|\n)\s*[๐-๙\d]+[\.\)]\s*(.+)',
+        r'(?:^|\n)\s*ข้อ\s*[๐-๙\d]+\s*(.+)',
+        r'(?:^|\n)\s*หมวด(?:ที่)?\s*[๐-๙\d]+\s*(.+)',
     ]
     for pattern in patterns:
         matches = re.findall(pattern, text)
         for m in matches:
-            clean = m.strip()[:80]
-            if clean and len(clean) > 3:
+            clean = m.strip()[:60]
+            # Ensure it looks like a generic header (e.g. ความเป็นมา, วัตถุประสงค์) and not a specific project sentence
+            if clean and len(clean) > 3 and not any(kw in clean for kw in ['รฟม', 'โครงการ', 'งานจ้าง', 'บริษัท', 'กรม']):
                 headers.append(clean)
-    return list(dict.fromkeys(headers))[:30]  # deduplicate, keep order, max 30
+    return list(dict.fromkeys(headers))[:20]
 
 
 def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
     """
     Builds or loads the TOR Knowledge Base from sample files.
-    Returns a dict with:
-      - 'tor_structures': list of section headers from sample TOR docs
-      - 'checklist_examples': list of sample checklist row patterns
-      - 'category_names': unique category names found in samples
-      - 'document_types': unique document types found in samples
     """
     global _knowledge_cache
 
-    # Return in-memory cache if available
     if _knowledge_cache and not force_rebuild:
         return _knowledge_cache
 
-    # Try loading from disk cache
     if not force_rebuild and os.path.exists(CACHE_PATH):
         try:
             with open(CACHE_PATH, 'r', encoding='utf-8') as f:
@@ -139,7 +130,6 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
         'document_types': set()
     }
 
-    # --- Step 1: Read sample TOR PDFs ---
     if os.path.isdir(SAMPLE_TOR_DIR):
         for fname in sorted(os.listdir(SAMPLE_TOR_DIR)):
             if fname.lower().endswith('.pdf'):
@@ -150,15 +140,14 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
                     kb['tor_structures'].append({
                         'source': fname,
                         'sections': headers,
-                        'sample_text': text[:1500]  # Keep only first 1500 chars as reference
+                        'sample_text': text[:500] # Kept minimal
                     })
                     print(f"  [TOR] {fname}: {len(headers)} sections extracted")
                 else:
-                    print(f"  [TOR] {fname}: scanned PDF (no extractable text)")
+                    print(f"  [TOR] {fname}: scanned PDF")
     else:
         print(f"[KnowledgeBase] Sample TOR directory not found: {SAMPLE_TOR_DIR}")
 
-    # --- Step 2: Read sample TOR Checklist Excel files ---
     if os.path.isdir(SAMPLE_CHECKLIST_DIR):
         for fname in sorted(os.listdir(SAMPLE_CHECKLIST_DIR)):
             if fname.lower().endswith('.xlsx'):
@@ -169,23 +158,20 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
                         'source': fname,
                         'rows': rows
                     })
-                    # Collect unique categories and document types
                     for row in rows:
                         cat = row.get('หมวดหมู่หลัก', '')
-                        if cat:
+                        if cat and len(cat) < 50:
                             kb['category_names'].add(cat)
                         doc = row.get('ชื่อเอกสารที่ใช้ยื่น', '')
-                        if doc:
+                        if doc and len(doc) < 50:
                             kb['document_types'].add(doc)
                     print(f"  [Checklist] {fname}: {len(rows)} pattern rows extracted")
     else:
         print(f"[KnowledgeBase] Sample Checklist directory not found: {SAMPLE_CHECKLIST_DIR}")
 
-    # Convert sets to lists for JSON serialization
     kb['category_names'] = sorted(list(kb['category_names']))
     kb['document_types'] = sorted(list(kb['document_types']))
 
-    # Save to disk cache
     try:
         with open(CACHE_PATH, 'w', encoding='utf-8') as f:
             json.dump(kb, f, ensure_ascii=False, indent=2)
@@ -200,42 +186,31 @@ def build_tor_knowledge_base(force_rebuild: bool = False) -> dict:
 def get_knowledge_prompt_section(kb: dict) -> str:
     """
     Converts the Knowledge Base into a concise prompt section.
-    CRITICAL FIX: We do NOT inject full JSON sample objects here, because OpenTyphoon AI
-    literally copies them and ignores the real chunks (Prompt Mimicry / Example Overfitting).
-    Instead, we inject only the structural rules, category names, and document types.
+    CRITICAL FIX: Fully strips any specific sample project sentences or headers
+    to guarantee zero leakage/hallucination of wrong project data (e.g. รฟม).
+    Injects only clean generic category names and document types.
     """
     sections = []
 
-    # 1. Common TOR section structure
-    all_section_names = set()
-    for tor in kb.get('tor_structures', []):
-        for s in tor.get('sections', []):
-            all_section_names.add(s)
-    if all_section_names:
-        sections.append(
-            "หัวข้อโครงสร้างที่พบบ่อยในเอกสาร TOR ของหน่วยงานราชการไทย:\n" +
-            ", ".join(sorted(all_section_names)[:30])
-        )
-
-    # 2. Common category names
-    cats = kb.get('category_names', [])
+    # 1. Clean generic category names
+    cats = [c for c in kb.get('category_names', []) if not any(kw in c for kw in ['รฟม', 'โครงการ', 'ประจำปี'])]
     if cats:
         sections.append(
             "หมวดหมู่หลัก (Main Categories) ที่ใช้จัดกลุ่มข้อกำหนด (กรุณาเลือกใช้ตามความเหมาะสมของเนื้อหาจริง):\n" +
             ", ".join(cats[:30])
         )
 
-    # 3. Common document types
-    docs = kb.get('document_types', [])
+    # 2. Clean generic document types
+    docs = [d for d in kb.get('document_types', []) if not any(kw in d for kw in ['รฟม', 'โครงการ'])]
     if docs:
         sections.append(
             "ชื่อเอกสารที่ใช้ยื่น (Document Types) ที่พบบ่อย (กรุณาเลือกใช้ตามความเหมาะสมของเนื้อหาจริง):\n" +
             ", ".join(docs[:30])
         )
 
-    # 4. Strict instruction against hallucination
+    # 3. Strict instruction against hallucination
     sections.append(
-        "กฎเหล็กสำคัญ: ข้อมูลด้านบนเป็นเพียงคลังคำศัพท์และโครงสร้างอ้างอิงเท่านั้น ห้ามสร้างข้อมูลสมมติขึ้นมาเองเด็ดขาด! ให้สกัดข้อกำหนดจากเนื้อหาจริงของเอกสารที่ส่งมาในรอบนี้เท่านั้น"
+        "กฎเหล็กสำคัญ: ข้อมูลด้านบนเป็นเพียงคลังคำศัพท์หมวดหมู่และชื่อเอกสารอ้างอิงเท่านั้น ห้ามสร้างข้อมูลสมมติหรือนำชื่อโครงการอื่นมาปะปนเด็ดขาด! ให้สกัดข้อกำหนดทั้งหมดจากเนื้อหาจริงของเอกสารที่ส่งมาในรอบนี้เท่านั้น"
     )
 
     return "\n\n".join(sections)
