@@ -58,11 +58,12 @@ def _call_gemini_critic_ai(system_prompt: str, user_content: str, max_tokens: in
         return None
     
     gemini_models = [
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-002",
-        "gemini-1.5-pro-latest",
-        "gemini-1.5-pro-002",
-        "gemini-pro"
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-flash-latest",
+        "gemini-pro-latest",
+        "gemini-3.5-flash"
     ]
     
     payload = {
