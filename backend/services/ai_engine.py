@@ -11,7 +11,7 @@ Architecture:
   4. Smart Hybrid Text Harvesting (highly granular fallback to ensure ZERO rows are lost)
   5. AI Critic Self-Correction Loop (with strict anti-truncation safeguards)
   6. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
-  7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty)
+  7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and filters out non-Thai garbage)
   8. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
 """
 import os
@@ -35,10 +35,10 @@ CHUNK_OVERLAP = 600
 def _get_target_models() -> list:
     """Get list of available models using raw requests with clean list/dict parsing."""
     target_models = [
+        "typhoon-v2.5-30b-a3b-instruct",
         "typhoon-v2.5-30b-instruct",
         "typhoon-v2.5-70b-instruct",
-        "typhoon-v2.5-8b-instruct",
-        "typhoon-v2.5-30b-a3b-instruct"
+        "typhoon-v2.5-8b-instruct"
     ]
     try:
         url = f"{TYPHOON_BASE_URL}/models"
@@ -428,7 +428,7 @@ def generate_tor_checklist(text_content: str) -> dict:
       4. Deduplicate & filter out gibberish/hallucinations (_is_valid_tor_item)
       5. AI Critic Self-Correction Loop (safe non-truncating)
       6. Natural Hierarchical Sorting (solves out-of-order numbering e.g. 5, 7, 10, 6)
-      7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty)
+      7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and strictly filters non-Thai garbage)
       8. Final Polish (populates empty 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ')
       9. Return final result
 
@@ -492,11 +492,16 @@ def generate_tor_checklist(text_content: str) -> dict:
     except Exception as critic_err:
         print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
 
-    # ULTIMATE FAIL-SAFE FALLBACK: Guarantee table is NEVER empty
+    # ULTIMATE FAIL-SAFE FALLBACK: Guarantee table is NEVER empty, and strictly verify Thai content
     if not all_items:
-        print("[AI Engine] Ultimate fail-safe fallback triggered! Harvesting all lines from document...")
-        lines = [l.strip() for l in clean_text.split('\n') if l.strip() and len(l.strip()) >= 5]
-        for idx, line in enumerate(lines[:300], 1):
+        print("[AI Engine] Ultimate fail-safe fallback triggered! Harvesting valid Thai lines from document...")
+        lines = [l.strip() for l in clean_text.split('\n') if l.strip() and len(l.strip()) >= 10]
+        valid_lines = [l for l in lines if len(re.findall(r'[\u0E00-\u0E7F]', l)) >= 5]
+        
+        if not valid_lines:
+            valid_lines = ["เอกสารต้นฉบับไม่พบข้อความภาษาไทยที่สามารถสกัดได้ (ไฟล์อาจเป็นรูปภาพสแกนที่ไม่มีข้อความ หรือเข้ารหัสฟอนต์)"]
+
+        for idx, line in enumerate(valid_lines[:300], 1):
             all_items.append({
                 "Status": "",
                 "ลำดับ": f"{idx}.",

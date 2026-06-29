@@ -14,8 +14,9 @@ def extract_text_from_file(file_path: str) -> str:
     """
     Extracts text from PDF, DOCX, XLSX, TXT, or Image files.
     Strictly extracts real text from the uploaded file.
-    CRITICAL SALVAGE FIX: If PDF binary reading is required, completely strips
-    all PDF command syntax (PDF17, obj, stream, ICCBased) and extracts ONLY valid Thai words.
+    CRITICAL CLOUD FIX: Detects corrupted CID font extraction from pdfplumber
+    (where text is just numbers/symbols) and forces a deep binary salvage
+    recovering valid Thai text across utf-8, cp874, and tis-620 encodings.
     """
     if not os.path.exists(file_path):
         return f"[Error] File not found: {file_path}"
@@ -42,24 +43,32 @@ def extract_text_from_file(file_path: str) -> str:
             except Exception as pdf_err:
                 print(f"pdfplumber error: {pdf_err}. Attempting raw binary salvage...")
             
-            # If pdfplumber and tesseract failed, salvage raw readable Thai strings from PDF binary structure
+            # CRITICAL FIX: Verify if pdfplumber extracted valid Thai text or just CID font garbage / numbers
+            thai_count = len(re.findall(r'[\u0E00-\u0E7F]', full_text))
+            if thai_count < 20:
+                print(f"[OCR Service] pdfplumber extracted corrupted CID text (Thai chars={thai_count}). Discarding garbage and triggering deep binary salvage...")
+                full_text = "" # Discard garbage!!!
+            
+            # If pdfplumber failed or returned CID garbage, salvage raw readable Thai strings from PDF binary structure
             if not full_text.strip():
-                print("Extracting raw readable Thai strings directly from PDF binary structure...")
+                print("[OCR Service] Extracting raw readable Thai strings directly from PDF binary structure...")
                 with open(file_path, 'rb') as f:
                     content_bytes = f.read()
-                    raw_content = content_bytes.decode('utf-8', errors='ignore') + content_bytes.decode('cp874', errors='ignore')
+                    raw_content = content_bytes.decode('utf-8', errors='ignore') + content_bytes.decode('cp874', errors='ignore') + content_bytes.decode('tis-620', errors='ignore')
                     
-                    # Remove all PDF syntax tokens and control commands
+                    # Remove all PDF syntax tokens, numbers, and control commands
                     clean_raw = re.sub(r'\b(obj|endobj|stream|endstream|ICCBased|FlateDecode|Length|Filter|DecodeParms|Columns|Predictor|TiffPredictor|Title|Author|Subject|Creator|Producer|CreationDate|ModDate|Trapped|Root|Pages|Kids|Count|Type|Catalog|Page|MediaBox|Contents|Resources|Font|ProcSet|Encoding|BaseFont|Subtype|Widths|FirstChar|LastChar|FontDescriptor|FontBBox|Ascent|Descent|CapHeight|StemV|ItalicAngle|Flags|XObject|ColorSpace|Pattern|Shading|ExtGState|Properties|Annots|URI|Action|StructTreeRoot|Parent|StructElem|Title|Lang|MarkInfo|ViewerPreferences|Direction|HideToolbar|HideMenubar|HideWindowUI|FitWindow|CenterWindow|DisplayDocTitle|NonFullScreenPageMode|ViewArea|ViewClip|PrintArea|PrintClip|PrintScaling|Duplex|PickTrayByPDFSize|PrintPageRange|NumCopies)\b', '', raw_content)
                     clean_raw = re.sub(r'PDF-\d+\.\d+', '', clean_raw)
                     clean_raw = re.sub(r'\b\d+\s+\d+\s+obj\b', '', clean_raw)
                     
-                    # Keep only valid Thai words and normal meaningful text lines
-                    thai_matches = re.findall(r'[\u0E00-\u0E7F\s\d\.\(\)\/]{5,}', clean_raw)
-                    full_text = "\n".join([m.strip() for m in thai_matches if len(m.strip()) > 5])
+                    # Keep only valid Thai words and meaningful text lines (ignore standalone numbers/slashes)
+                    thai_matches = re.findall(r'[\u0E00-\u0E7F\s\d\.\(\)\/]{10,}', clean_raw)
+                    # Filter out lines that don't have at least 5 Thai characters
+                    valid_thai_lines = [m.strip() for m in thai_matches if len(re.findall(r'[\u0E00-\u0E7F]', m)) >= 5]
+                    full_text = "\n".join(valid_thai_lines)
                 
                 if not full_text.strip():
-                    full_text = f"เอกสาร TOR: {os.path.basename(file_path)}\n\n(ไม่พบข้อความที่สามารถสกัดได้ในไฟล์นี้เนื่องจากไฟล์เป็นรูปภาพสแกนที่ไม่มีเลเยอร์ข้อความ หรือเข้ารหัส)"
+                    full_text = f"เอกสาร TOR: {os.path.basename(file_path)}\n\n(ไม่พบข้อความภาษาไทยที่สามารถสกัดได้ในไฟล์นี้เนื่องจากไฟล์เป็นรูปภาพสแกนที่ไม่มีเลเยอร์ข้อความ หรือเข้ารหัสฟอนต์)"
 
         elif ext == '.docx':
             doc = docx.Document(file_path)
