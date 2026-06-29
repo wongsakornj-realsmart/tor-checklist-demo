@@ -18,7 +18,7 @@ import os
 import json
 import re
 import math
-from openai import OpenAI
+import requests
 
 from backend.services.knowledge_base import build_tor_knowledge_base, get_knowledge_prompt_section
 from backend.services.ai_critic import evaluate_and_correct_checklist
@@ -27,55 +27,63 @@ from backend.services.ai_critic import evaluate_and_correct_checklist
 TYPHOON_API_KEY = os.getenv("TYPHOON_API_KEY", "sk-Rmn1bvzNfpruBxlQWH9umkZRPPFTWbU4OtMtczKRUsGxnWmG")
 TYPHOON_BASE_URL = "https://api.opentyphoon.ai/v1"
 
-client = OpenAI(
-    api_key=TYPHOON_API_KEY,
-    base_url=TYPHOON_BASE_URL
-)
-
 # Optimized Chunk size for OpenTyphoon AI stability (chars per chunk)
 CHUNK_SIZE = 8000
 CHUNK_OVERLAP = 600
 
 
 def _get_target_models() -> list:
-    """Get list of available models, with dynamic discovery."""
+    """Get list of available models using raw requests with clean list/dict parsing."""
     target_models = [
-        "typhoon-v2.5-30b-a3b-instruct",
-        "typhoon-v2.1-12b-instruct",
-        "typhoon-v2-70b-instruct",
-        "typhoon-v2-8b-instruct",
-        "typhoon-v1.5x-70b-instruct",
-        "typhoon-v1.5-instruct"
+        "typhoon-v2.5-30b-instruct",
+        "typhoon-v2.5-70b-instruct",
+        "typhoon-v2.5-8b-instruct",
+        "typhoon-v2.5-30b-a3b-instruct"
     ]
     try:
-        available_models = [m.id for m in client.models.list().data]
-        print(f"[AI Engine] Discovered models: {available_models}")
-        instruct_models = [m for m in available_models if 'instruct' in m.lower()]
-        if instruct_models:
-            target_models = instruct_models + target_models
+        url = f"{TYPHOON_BASE_URL}/models"
+        headers = {"Authorization": f"Bearer {TYPHOON_API_KEY}"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            resp_json = resp.json()
+            models_data = resp_json if isinstance(resp_json, list) else resp_json.get("data", [])
+            available_models = [m.get("id") for m in models_data if isinstance(m, dict) and m.get("id")]
+            print(f"[AI Engine] Discovered models via requests: {available_models}")
+            instruct_models = [m for m in available_models if 'instruct' in m.lower()]
+            if instruct_models:
+                target_models = instruct_models + target_models
     except Exception as e:
-        print(f"[AI Engine] Model discovery failed: {e}")
+        print(f"[AI Engine] Model discovery via requests failed: {e}")
     return target_models
 
 
 def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
-    """Makes an AI call with model fallback. Returns raw response text or None."""
+    """Makes an AI call with model fallback using raw requests and expanded timeout."""
     target_models = _get_target_models()
+    headers = {
+        "Authorization": f"Bearer {TYPHOON_API_KEY}",
+        "Content-Type": "application/json"
+    }
     for model_name in target_models:
         for mt in [max_tokens, max_tokens // 2]:
             try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                payload = {
+                    "model": model_name,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content}
                     ],
-                    temperature=0.15,
-                    max_tokens=mt
-                )
-                text = response.choices[0].message.content.strip()
-                if text:
-                    return text
+                    "temperature": 0.15,
+                    "max_tokens": mt
+                }
+                # Expanded timeout to 90s to easily accommodate 4096 tokens
+                resp = requests.post(f"{TYPHOON_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=90)
+                if resp.status_code == 200:
+                    text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if text:
+                        return text
+                else:
+                    print(f"[AI Engine] {model_name} returned status {resp.status_code}: {resp.text}")
             except Exception as e:
                 print(f"[AI Engine] {model_name} (max_tokens={mt}) failed: {e}")
                 continue
@@ -90,6 +98,10 @@ def _is_valid_tor_item(item: dict) -> bool:
     req = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
 
     if not req or req in ['None', 'null', '']:
+        return False
+
+    # Prevent prompt echoing / header bleed (e.g. "ส่วนที่ 31/36 ของเอกสาร TOR")
+    if "ส่วนที่" in req and "ของเอกสาร TOR" in req:
         return False
 
     # 1. Check for repeating letter glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd)
@@ -304,7 +316,7 @@ def _harvest_checklist_from_text(chunk_text: str, current_category: str = "ข�
                  "รองรับ", "สามารถ", "ให้บริการ", "พัฒนา", "ติดตั้ง", "บำรุงรักษา",
                  "ตรวจสอบ", "รับประกัน", "คณะกรรมการ", "อบรม", "คู่มือ",
                  "คุณลักษณะ", "คุณสมบัติเฉพาะ", "สถานที่", "ค่าใช้จ่าย", "เบิกจ่าย",
-                 "งวดงาน", "หลักประกัน", "ปรับ", "ความลับ", "ลิขสิทธิ์", "กรณี", "ผู้ยื่น"]
+                 "งวดงาน", "หลักประกัน", "ปรับ", "ความลับ", "ลิขสิทธิ์", "กรณี", "ผู้ยื่น", "งาน"]
     
     cat = current_category
     subcat = "รายละเอียดข้อกำหนด"
@@ -342,7 +354,8 @@ def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks:
     """Extracts checklist items using AI, with Smart Hybrid Text Harvester fallback."""
     print(f"[AI Engine] Processing chunk {chunk_num}/{total_chunks} ({len(chunk_text)} chars)...")
 
-    user_msg = f"ส่วนที่ {chunk_num}/{total_chunks} ของเอกสาร TOR:\n\n{chunk_text}"
+    # Clean user message without prompt echoing headers
+    user_msg = chunk_text
     response_text = _call_ai(system_prompt, user_msg, max_tokens=4096)
     items = _parse_json_array(response_text)
     

@@ -8,7 +8,12 @@ from pythainlp.util import normalize
 def fix_spelling(text):
     if not text:
         return text
-    text = normalize(str(text))
+    text = str(text)
+    
+    # CRITICAL FIX: Strip illegal XML control characters to prevent openpyxl IllegalCharacterError crashes
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    
+    text = normalize(text)
     
     # 1. Regex universal OCR fixes
     # Fix double vowels/tones (e.g. ประสิทธิิภาพ -> ประสิทธิภาพ)
@@ -16,7 +21,7 @@ def fix_spelling(text):
     # Fix misplaced Sara I/U after two consonants with Sara E (e.g. ดำเนนิ -> ดำเนิน)
     text = re.sub(r'เ([ก-ฮ])([ก-ฮ])([ิีึืุูั])([่้๊๋์]?)', r'เ\1\3\4\2', text)
     
-    # 2. Dictionary of common OCR spelling errors in technical documents and known anomalies
+    # 2. Dictionary of common OCR spelling errors in technical documents
     common_fixes = {
         'ผยู้ น': 'ผู้ยื่น',
         'ผยู้น': 'ผู้ยื่น',

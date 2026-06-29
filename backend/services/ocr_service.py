@@ -1,14 +1,21 @@
 import os
+import re
 import pdfplumber
 import docx
 import pandas as pd
-import pytesseract
 from PIL import Image
+
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 
 def extract_text_from_file(file_path: str) -> str:
     """
     Extracts text from PDF, DOCX, XLSX, TXT, or Image files.
-    Strictly extracts real text from the uploaded file without any hardcoded mock fallbacks.
+    Strictly extracts real text from the uploaded file.
+    CRITICAL SALVAGE FIX: If PDF binary reading is required, completely strips
+    all PDF command syntax (PDF17, obj, stream, ICCBased) and extracts ONLY valid Thai words.
     """
     if not os.path.exists(file_path):
         return f"[Error] File not found: {file_path}"
@@ -26,25 +33,33 @@ def extract_text_from_file(file_path: str) -> str:
                             full_text += text + "\n"
                         else:
                             # Fallback to OCR if page has no selectable text (Scanned PDF)
-                            try:
-                                img = page.to_image().original
-                                full_text += pytesseract.image_to_string(img, lang='tha+eng') + "\n"
-                            except Exception as ocr_err:
-                                print(f"OCR Error on PDF page: {ocr_err}")
+                            if pytesseract:
+                                try:
+                                    img = page.to_image().original
+                                    full_text += pytesseract.image_to_string(img, lang='tha+eng') + "\n"
+                                except Exception as ocr_err:
+                                    print(f"OCR Error on PDF page: {ocr_err}")
             except Exception as pdf_err:
-                print(f"pdfplumber error: {pdf_err}. Attempting raw string reading...")
+                print(f"pdfplumber error: {pdf_err}. Attempting raw binary salvage...")
             
-            # If pdfplumber and tesseract failed (e.g. scanned PDF on cloud without tesseract binary), salvage raw text strings from binary
+            # If pdfplumber and tesseract failed, salvage raw readable Thai strings from PDF binary structure
             if not full_text.strip():
-                print("Extracting raw readable strings directly from PDF binary structure...")
+                print("Extracting raw readable Thai strings directly from PDF binary structure...")
                 with open(file_path, 'rb') as f:
-                    raw_content = f.read().decode('utf-8', errors='ignore')
-                    # Keep Thai, English characters and numbers
-                    full_text = "".join([c for c in raw_content if c.isalnum() or c.isspace()])
+                    content_bytes = f.read()
+                    raw_content = content_bytes.decode('utf-8', errors='ignore') + content_bytes.decode('cp874', errors='ignore')
+                    
+                    # Remove all PDF syntax tokens and control commands
+                    clean_raw = re.sub(r'\b(obj|endobj|stream|endstream|ICCBased|FlateDecode|Length|Filter|DecodeParms|Columns|Predictor|TiffPredictor|Title|Author|Subject|Creator|Producer|CreationDate|ModDate|Trapped|Root|Pages|Kids|Count|Type|Catalog|Page|MediaBox|Contents|Resources|Font|ProcSet|Encoding|BaseFont|Subtype|Widths|FirstChar|LastChar|FontDescriptor|FontBBox|Ascent|Descent|CapHeight|StemV|ItalicAngle|Flags|XObject|ColorSpace|Pattern|Shading|ExtGState|Properties|Annots|URI|Action|StructTreeRoot|Parent|StructElem|Title|Lang|MarkInfo|ViewerPreferences|Direction|HideToolbar|HideMenubar|HideWindowUI|FitWindow|CenterWindow|DisplayDocTitle|NonFullScreenPageMode|ViewArea|ViewClip|PrintArea|PrintClip|PrintScaling|Duplex|PickTrayByPDFSize|PrintPageRange|NumCopies)\b', '', raw_content)
+                    clean_raw = re.sub(r'PDF-\d+\.\d+', '', clean_raw)
+                    clean_raw = re.sub(r'\b\d+\s+\d+\s+obj\b', '', clean_raw)
+                    
+                    # Keep only valid Thai words and normal meaningful text lines
+                    thai_matches = re.findall(r'[\u0E00-\u0E7F\s\d\.\(\)\/]{5,}', clean_raw)
+                    full_text = "\n".join([m.strip() for m in thai_matches if len(m.strip()) > 5])
                 
                 if not full_text.strip():
-                    # If completely unreadable binary, return a notification indicating exact file name and status
-                    full_text = f"เอกสาร TOR: {os.path.basename(file_path)}\n\nไม่พบข้อความที่สามารถสกัดได้ในไฟล์นี้ (ไฟล์อาจเป็นรูปภาพสแกนที่ไม่มีข้อความเลเยอร์ หรือเข้ารหัส)"
+                    full_text = f"เอกสาร TOR: {os.path.basename(file_path)}\n\n(ไม่พบข้อความที่สามารถสกัดได้ในไฟล์นี้เนื่องจากไฟล์เป็นรูปภาพสแกนที่ไม่มีเลเยอร์ข้อความ หรือเข้ารหัส)"
 
         elif ext == '.docx':
             doc = docx.Document(file_path)
@@ -61,11 +76,14 @@ def extract_text_from_file(file_path: str) -> str:
                 full_text = f.read()
 
         elif ext in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
-            try:
-                full_text = pytesseract.image_to_string(Image.open(file_path), lang='tha+eng')
-            except Exception as ocr_err:
-                print(f"OCR Error on Image: {ocr_err}")
-                full_text = f"เอกสารรูปภาพ TOR: {os.path.basename(file_path)}\n\n(ไม่สามารถสกัดข้อความจากรูปภาพได้เนื่องจากข้อจำกัดของระบบ OCR บนคลาวด์)"
+            if pytesseract:
+                try:
+                    full_text = pytesseract.image_to_string(Image.open(file_path), lang='tha+eng')
+                except Exception as ocr_err:
+                    print(f"OCR Error on Image: {ocr_err}")
+                    full_text = f"เอกสารรูปภาพ TOR: {os.path.basename(file_path)}\n\n(ไม่สามารถสกัดข้อความจากรูปภาพได้เนื่องจากข้อจำกัดของระบบ OCR บนคลาวด์)"
+            else:
+                full_text = f"เอกสารรูปภาพ TOR: {os.path.basename(file_path)}\n\n(ไม่สามารถสกัดข้อความจากรูปภาพได้เนื่องจากไม่มีโมดูล pytesseract)"
 
         return full_text.strip()
 

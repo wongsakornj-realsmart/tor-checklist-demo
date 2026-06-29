@@ -4,181 +4,167 @@ AI Critic Agent for TOR Checklist System.
 Acts as a Quality Auditor that reviews and corrects the AI-generated checklist
 items for spelling accuracy, logical coherence, completeness of required fields,
 and compliance with Thai government procurement terminology.
+CRITICAL DESIGN: Uses raw requests with robust list/dict parsing and 90s timeout.
 """
 import os
 import json
 import re
-from openai import OpenAI
+import requests
 
-# OpenTyphoon AI Configuration (shared with ai_engine)
+# OpenTyphoon AI Configuration
 TYPHOON_API_KEY = os.getenv("TYPHOON_API_KEY", "sk-Rmn1bvzNfpruBxlQWH9umkZRPPFTWbU4OtMtczKRUsGxnWmG")
 TYPHOON_BASE_URL = "https://api.opentyphoon.ai/v1"
 
-client = OpenAI(
-    api_key=TYPHOON_API_KEY,
-    base_url=TYPHOON_BASE_URL
-)
+# Maximum self-correction iterations
+MAX_CORRECTION_ROUNDS = 2
 
-MAX_CORRECTION_ROUNDS = 3
+CRITIC_SYSTEM_PROMPT = """คุณคือ "AI Critic Agent" ผู้ตรวจประเมินคุณภาพระดับอาวุโส (Senior QA Auditor) ประจำระบบวิเคราะห์เอกสารจัดซื้อจัดจ้างภาครัฐไทย (TOR Checklist System)
 
-CRITIC_SYSTEM_PROMPT = """คุณคือผู้ตรวจสอบคุณภาพ (Quality Auditor) ระดับอาวุโสด้านเอกสารจัดซื้อจัดจ้างภาครัฐไทย 
-หน้าที่ของคุณคือตรวจทานรายการ Checklist ที่ได้จากการสกัดข้อกำหนดเอกสาร TOR (Terms of Reference) แล้วแก้ไขให้ถูกต้องสมบูรณ์ที่สุด
+หน้าที่สำคัญที่สุดของคุณคือ: ตรวจสอบและแก้ไขรายการข้อกำหนด (Checklist items) ที่ AI เครื่องยนต์หลักสกัดออกมาจากเอกสารต้นฉบับ เพื่อให้มั่นใจ 100% ว่าข้อมูลมีความถูกต้องตามหลักเกณฑ์ต่อไปนี้:
 
-กฎการตรวจสอบ:
-1. ตรวจคำสะกด: ตรวจหาคำสะกดผิด สระลอย พยัญชนะผิดตำแหน่ง วรรณยุกต์ผิด แล้วแก้ไขให้ถูกต้อง
-   ตัวอย่าง: "วัตถุประสงค ์" → "วัตถุประสงค์", "หลักการและเหุตผล" → "หลักการและเหตุผล", "ประสิทธิิภาพ" → "ประสิทธิภาพ"
-2. ตรวจความหมาย: อ่านข้อความทุกบรรทัดแล้วประเมินว่าอ่านได้ใจความ สมเหตุสมผล (Make sense) หรือไม่ หากมีข้อความไม่สมบูรณ์หรือขาดหาย ให้แก้ไขให้อ่านรู้เรื่อง
-3. ตรวจการใช้คำ: ตรวจให้แน่ใจว่าใช้คำศัพท์ที่ถูกต้องตามมาตรฐานของหน่วยงานราชการไทย
-   ตัวอย่าง: ใช้ "ผู้ยื่นข้อเสนอ" ไม่ใช่ "ผู้เสนอราคา" (ถ้าเอกสารต้นฉบับใช้คำนี้), ใช้ "นิติบุคคล" ไม่ใช่ "บริษัท" (เมื่อเป็นทางการ)
-4. ตรวจความสอดคล้อง: ตรวจให้แน่ใจว่าเนื้อหาในแต่ละบรรทัดสอดคล้องกับหมวดหมู่หลักและหัวข้อย่อยที่ระบุไว้
-5. ตรวจความซ้ำซ้อน: หากมีข้อความซ้ำกัน 100% ให้รวมเป็นรายการเดียว
-6. ห้ามเปลี่ยนเนื้อหาหลัก: ห้ามเพิ่มข้อกำหนดใหม่ที่ไม่มีในต้นฉบับ ห้ามลบข้อกำหนดที่ถูกต้องออก ให้แก้ไขเฉพาะจุดบกพร่องเท่านั้น
-7. ตรวจสอบความครบถ้วนของข้อมูล (สำคัญมาก!): 
-   - ฟิลด์ "ชื่อเอกสารที่ใช้ยื่น": หากพบว่าเป็นค่าว่าง "" ให้เติมชื่อเอกสารที่เหมาะสม เช่น "ข้อเสนอทางเทคนิค (Technical Proposal)" หรือ "หนังสือรับรองผลงาน" เสมอ
-   - ฟิลด์ "รายละเอียดที่ต้องระบุ": หากพบว่าเป็นค่าว่าง "" ให้วิเคราะห์จากข้อกำหนดแล้วเขียนอธิบายสิ่งที่ต้องระบุ เช่น "ระบุยืนยันความพร้อมและอธิบายรายละเอียดการดำเนินงานตามข้อกำหนด" หรือ "แนบเอกสารหลักฐานพร้อมลงนามรับรอง" เสมอ ห้ามปล่อยว่างเด็ดขาด!
-8. ห้ามสร้างข้อความมั่วซั่ว (Gibberish) หรือข้อความซ้ำๆ เช่น 'PPPPPPPPP' หรือตัวอักษรประหลาดเด็ดขาด หากพบรายการที่มั่วซั่วไม่มีความหมาย ให้ตัดทิ้งทันที!
+1. ความถูกต้องของการสะกดคำ (Spelling Accuracy): แก้ไขคำผิดที่เกิดจากกระบวนการแปลงไฟล์ OCR หรือการหลงลืมของ AI (เช่น 'ผยู้ น' -> 'ผู้ยื่น', 'ขอบเข ต' -> 'ขอบเขต', 'เคื่รอง' -> 'เครื่อง')
+2. ความสมเหตุสมผลทางตรรกะ (Logical Coherence): ข้อความในฟิลด์ 'ข้อกำหนด / รายละเอียด' ต้องเป็นประโยคที่สมบูรณ์ อ่านเข้าใจ ไม่ขาดหายกลางคัน
+3. กฎเหล็กห้ามเพิ่มข้อมูลสมมติ (Strict Grounding): ห้ามคิดค้นข้อกำหนดใหม่ หรือนำชื่อโครงการอื่นมาใส่เด็ดขาด ให้ยึดจากเนื้อหาเอกสารต้นฉบับที่แนบมาให้พิจารณาเท่านั้น
+4. กฎเหล็กห้ามลบข้อกำหนด (Strict Anti-Truncation): คุณต้องรักษาจำนวนรายการข้อกำหนดเดิมไว้ให้ครบถ้วนที่สุด ห้ามลบทิ้งหรือย่อตารางเด็ดขาด
+5. การคัดกรองสิ่งแปลกปลอม (Anti-Gibberish): หากพบรายการที่เป็นตัวอักษรซ้ำๆ มั่วซั่ว (เช่น PPPPPPPPP) หรือเป็นรหัสแปลกประหลาด ให้ตัดรายการนั้นทิ้งได้
+6. ความถูกต้องของชื่อเอกสารและคำอธิบาย (Mandatory Fields):
+   - ฟิลด์ "ชื่อเอกสารที่ใช้ยื่น" ห้ามปล่อยว่างเด็ดขาด! ต้องมีชื่อเอกสารที่สอดคล้องกับข้อกำหนด (เช่น ข้อเสนอทางเทคนิค, หนังสือรับรองผลงาน, เอกสารจดทะเบียนนิติบุคคล)
+   - ฟิลด์ "รายละเอียดที่ต้องระบุ" ห้ามปล่อยว่างเด็ดขาด! ต้องมีคำอธิบายแนวทางการเขียนที่ชัดเจนและเป็นมืออาชีพ
 
-ข้อมูลที่ได้รับ:
-- "original_text": ข้อความต้นฉบับจากเอกสาร TOR (ใช้เป็นข้อมูลอ้างอิงในการตรวจสอบ)
-- "checklist": รายการ Checklist ที่ต้องตรวจทาน (JSON Array)
-
-ผลลัพธ์ที่ต้องตอบกลับ:
-ตอบกลับเป็น JSON Object ที่มี 2 ฟิลด์:
+กรุณาตอบกลับในรูปแบบ JSON Object ที่มีคีย์ "checklist" ซึ่งบรรจุรายการ JSON Array ทั้งหมดที่ผ่านการแก้ไขแล้ว ดังนี้:
+```json
 {
-  "corrections_made": จำนวนจุดที่แก้ไข (integer),
-  "checklist": [ ... รายการ Checklist ที่ผ่านการตรวจทานและแก้ไขแล้ว (JSON Array) ... ]
+  "checklist": [
+    {
+      "Status": "",
+      "ลำดับ": "1.",
+      "หมวดหมู่หลัก": "ความเป็นมา",
+      "หัวข้อย่อย": "รายละเอียดข้อกำหนด",
+      "ข้อกำหนด / รายละเอียด (Requirement / Details)": "เนื้อหาข้อกำหนดที่ถูกต้อง...",
+      "ชื่อเอกสารที่ใช้ยื่น": "ข้อเสนอทางเทคนิค (Technical Proposal)",
+      "รายละเอียดที่ต้องระบุ": "ระบุคำอธิบายยืนยันความพร้อม...",
+      "Comply?": "False",
+      "หมายเหตุ (Remarks)": ""
+    }
+  ]
 }
+```"""
 
-ข้อย้ำ: ตอบกลับมาเป็น JSON เท่านั้น ห้ามมีข้อความอื่นปน"""
 
-
-def _parse_critic_response(response_text: str) -> dict:
-    """Parses the AI Critic response, handling potential JSON issues."""
+def _get_target_models() -> list:
+    """Get list of available models using raw requests with clean list/dict parsing."""
+    target_models = [
+        "typhoon-v2.5-30b-instruct",
+        "typhoon-v2.5-70b-instruct",
+        "typhoon-v2.5-8b-instruct",
+        "typhoon-v2.5-30b-a3b-instruct"
+    ]
     try:
-        return json.loads(response_text)
+        url = f"{TYPHOON_BASE_URL}/models"
+        headers = {"Authorization": f"Bearer {TYPHOON_API_KEY}"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            resp_json = resp.json()
+            models_data = resp_json if isinstance(resp_json, list) else resp_json.get("data", [])
+            available_models = [m.get("id") for m in models_data if isinstance(m, dict) and m.get("id")]
+            instruct_models = [m for m in available_models if 'instruct' in m.lower()]
+            if instruct_models:
+                target_models = instruct_models + target_models
+    except Exception as e:
+        print(f"[AI Critic] Model discovery via requests failed: {e}")
+    return target_models
+
+
+def _call_critic_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
+    """Makes a critic AI call using raw requests with expanded 90s timeout."""
+    target_models = _get_target_models()
+    headers = {
+        "Authorization": f"Bearer {TYPHOON_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    for model_name in target_models:
+        for mt in [max_tokens, max_tokens // 2]:
+            try:
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    "temperature": 0.15,
+                    "max_tokens": mt
+                }
+                resp = requests.post(f"{TYPHOON_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=90)
+                if resp.status_code == 200:
+                    text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if text:
+                        return text
+                else:
+                    print(f"[AI Critic] {model_name} returned status {resp.status_code}: {resp.text}")
+            except Exception as e:
+                print(f"[AI Critic] {model_name} (max_tokens={mt}) failed: {e}")
+                continue
+    return None
+
+
+def _parse_critic_response(text: str) -> dict:
+    """Robustly parses the JSON response from AI Critic."""
+    if not text:
+        return None
+
+    try:
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if 'checklist' in data:
+                return data
     except:
         pass
 
     try:
-        obj_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if obj_match:
-            return json.loads(obj_match.group(0))
-    except:
-        pass
-
-    try:
-        arr_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        arr_match = re.search(r'\[.*\]', text, re.DOTALL)
         if arr_match:
-            data = json.loads(arr_match.group(0))
-            return {"corrections_made": -1, "checklist": data}
+            items = json.loads(arr_match.group(0))
+            return {"checklist": items}
     except:
         pass
-
-    object_matches = re.findall(r'\{[^{}]+\}', response_text, re.DOTALL)
-    valid_objs = []
-    for obj_str in object_matches:
-        try:
-            obj = json.loads(obj_str)
-            if 'ลำดับ' in obj or 'หมวดหมู่หลัก' in obj:
-                valid_objs.append(obj)
-        except:
-            pass
-    if valid_objs:
-        return {"corrections_made": -1, "checklist": valid_objs}
 
     return None
 
 
 def evaluate_and_correct_checklist(original_text: str, raw_checklist: list) -> list:
     """
-    Runs the AI Critic Agent to review and correct the checklist.
-    Uses a self-correction loop with up to MAX_CORRECTION_ROUNDS iterations.
-
-    Args:
-        original_text: The original TOR document text (for reference)
-        raw_checklist: The AI-generated checklist items to review
-
-    Returns:
-        The corrected checklist items (list of dicts)
+    Executes the AI Critic review loop to verify and correct checklist items.
     """
+    if not raw_checklist:
+        return []
+
     current_checklist = raw_checklist
+    print(f"[AI Critic] Starting self-correction auditing ({len(current_checklist)} items)...")
 
-    # Truncate original text to fit within context limits
-    ref_text = original_text[:15000]
-
-    target_models = [
-        "typhoon-v2.5-30b-a3b-instruct",
-        "typhoon-v2.1-12b-instruct",
-        "typhoon-v2-70b-instruct",
-        "typhoon-v2-8b-instruct",
-    ]
+    short_original = original_text[:12000]
 
     for round_num in range(1, MAX_CORRECTION_ROUNDS + 1):
         print(f"[AI Critic] Self-Correction Round {round_num}/{MAX_CORRECTION_ROUNDS}...")
 
-        user_content = json.dumps({
-            "original_text": ref_text,
-            "checklist": current_checklist
-        }, ensure_ascii=False)
+        checklist_str = json.dumps(current_checklist, ensure_ascii=False, indent=2)
+        user_content = f"""=== ข้อความต้นฉบับเอกสาร TOR (ส่วนอ้างอิง) ===\n{short_original}\n\n=== รายการ Checklist ที่ AI สกัดมา (ต้องการการตรวจสอบและแก้ไข) ===\n{checklist_str}"""
 
-        success = False
-        for model_name in target_models:
-            try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content}
-                    ],
-                    temperature=0.1,
-                    max_tokens=4096 # Upgraded to 4096 to prevent truncation
-                )
+        response_text = _call_critic_ai(CRITIC_SYSTEM_PROMPT, user_content, max_tokens=4096)
+        result = _parse_critic_response(response_text)
 
-                response_text = response.choices[0].message.content.strip()
-                result = _parse_critic_response(response_text)
-
-                if result and 'checklist' in result and len(result['checklist']) > 0:
-                    corrections = result.get('corrections_made', -1)
-                    new_checklist = result['checklist']
-
-                    print(f"[AI Critic] Round {round_num}: {corrections} corrections made, {len(new_checklist)} items returned")
-
-                    if corrections == 0:
-                        print(f"[AI Critic] No corrections needed. Quality verified! ✓")
-                        return new_checklist
-
-                    current_checklist = new_checklist
-                    success = True
-                    break
-                else:
-                    print(f"[AI Critic] Round {round_num}: Could not parse response from {model_name}")
-                    continue
-
-            except Exception as e:
-                print(f"[AI Critic] Round {round_num}: Model {model_name} failed: {e}")
-                continue
-
-        if not success:
-            print(f"[AI Critic] Round {round_num}: All models failed. Using current checklist.")
+        if result and 'checklist' in result and isinstance(result['checklist'], list) and len(result['checklist']) > 0:
+            new_checklist = result['checklist']
+            if len(new_checklist) >= (len(current_checklist) * 0.9):
+                print(f"[AI Critic] Round {round_num}: Successfully corrected checklist ({len(new_checklist)} items).")
+                current_checklist = new_checklist
+                break
+            else:
+                print(f"[AI Critic] Round {round_num}: Rejected correction due to unacceptable row truncation ({len(new_checklist)} vs {len(current_checklist)}).")
+                break
+        else:
+            print(f"[AI Critic] Round {round_num}: Failed to obtain valid JSON from Critic models. Retaining current checklist.")
             break
 
-    print(f"[AI Critic] Completed {round_num} correction rounds. Returning best result.")
+    print(f"[AI Critic] Completed self-correction auditing. Returning verified result.")
     return current_checklist
-
-
-if __name__ == '__main__':
-    test_checklist = [
-        {
-            "Status": "",
-            "ลำดับ": "1.",
-            "หมวดหมู่หลัก": "หลักการและเหุตผล",
-            "หัวข้อย่อย": "หลักการและเหุตผล",
-            "ข้อกำหนด / รายละเอียด (Requirement / Details)": "ตามรฐัธรรมนูญแห่งราชอาณาจักรไทย",
-            "ชื่อเอกสารที่ใช้ยื่น": "",
-            "รายละเอียดที่ต้องระบุ": "",
-            "Comply?": "False",
-            "หมายเหตุ (Remarks)": ""
-        }
-    ]
-    result = evaluate_and_correct_checklist("ตามรัฐธรรมนูญแห่งราชอาณาจักรไทย", test_checklist)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
