@@ -508,14 +508,19 @@ def generate_tor_checklist(text_content: str) -> dict:
     metadata = _extract_metadata(clean_text)
 
     # Step 3: Chunked Checklist Extraction
-    print("[AI Engine] Step 3: Chunked Checklist Extraction (Hybrid AI + Smart Harvesting)...")
+    print("[AI Engine] Step 3: Chunked Checklist Extraction (Parallel AI + Smart Harvesting)...")
     system_prompt = _build_checklist_prompt(knowledge_section)
     chunks = _split_into_chunks(clean_text)
 
     all_items = []
-    for i, chunk in enumerate(chunks, 1):
-        chunk_items = _extract_checklist_from_chunk(chunk, i, len(chunks), system_prompt)
-        all_items.extend(chunk_items)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(_extract_checklist_from_chunk, chunk, i, len(chunks), system_prompt) for i, chunk in enumerate(chunks, 1)]
+        for future in futures:
+            try:
+                all_items.extend(future.result())
+            except Exception as e:
+                print(f"[AI Engine] Parallel chunk extraction error: {e}")
 
     if not all_items:
         print("[AI Engine] All AI extraction failed. Using direct text harvesting fallback...")
@@ -532,19 +537,22 @@ def generate_tor_checklist(text_content: str) -> dict:
 
     print(f"[AI Engine] Total checklist items after dedup and cleaning: {len(all_items)}")
 
-    # Step 6: AI Critic Self-Correction
-    print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
-    try:
-        corrected = evaluate_and_correct_checklist(clean_text, all_items)
-        clean_corrected = [item for item in corrected if isinstance(item, dict) and _is_valid_tor_item(item)] if corrected else []
-        
-        if clean_corrected and len(clean_corrected) >= (len(all_items) * 0.9):
-            all_items = clean_corrected
-            print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
-        else:
-            print(f"[AI Engine] Critic truncated/lost rows ({len(clean_corrected)} vs {len(all_items)}). Keeping original complete items.")
-    except Exception as critic_err:
-        print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
+    # Step 6: AI Critic Self-Correction (Skip if > 80 items to avoid maxOutputTokens timeout)
+    if len(all_items) <= 80:
+        print("[AI Engine] Step 5: AI Critic Self-Correction Loop...")
+        try:
+            corrected = evaluate_and_correct_checklist(clean_text, all_items)
+            clean_corrected = [item for item in corrected if isinstance(item, dict) and _is_valid_tor_item(item)] if corrected else []
+            
+            if clean_corrected and len(clean_corrected) >= (len(all_items) * 0.9):
+                all_items = clean_corrected
+                print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
+            else:
+                print(f"[AI Engine] Critic truncated/lost rows ({len(clean_corrected)} vs {len(all_items)}). Keeping original complete items.")
+        except Exception as critic_err:
+            print(f"[AI Engine] Critic failed (non-critical): {critic_err}")
+    else:
+        print(f"[AI Engine] Step 5: Skipping AI Critic (dataset has {len(all_items)} items, avoiding maxOutputTokens timeout). Relying on robust Final Polish...")
 
     # ULTIMATE FAIL-SAFE FALLBACK: Guarantee table is NEVER empty, and strictly verify Thai content
     if not all_items:
