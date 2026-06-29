@@ -1,18 +1,21 @@
 """
 AI Engine for TOR Checklist System.
 
-Uses OpenTyphoon AI with Dynamic RAG (Knowledge Base), Bulletproof Gibberish Filtering,
-and Smart Hybrid Text Harvesting to guarantee comprehensive, 100% complete checklist extraction.
+Uses Google Gemini 1.5 Flash (Primary Enterprise Engine) with OpenTyphoon AI Fallback,
+Dynamic RAG (Knowledge Base), Bulletproof Gibberish Filtering, and Smart Hybrid Text Harvesting
+to guarantee comprehensive, 100% complete checklist extraction.
 
 Architecture:
-  1. Metadata Extraction (dedicated small AI call + robust text fallback)
-  2. Chunked Checklist Extraction (optimized 8000-char chunks, expanded 300,000 char limit)
-  3. Highly Precise Hallucination/Gibberish Filtering (_is_valid_tor_item on requirement text)
-  4. Smart Hybrid Text Harvesting (highly granular fallback to ensure ZERO rows are lost)
-  5. AI Critic Self-Correction Loop (with strict anti-truncation safeguards)
-  6. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
-  7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and filters out non-Thai garbage)
-  8. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
+  1. Google Gemini 1.5 Flash Integration (1M Context, JSON mode, lightning fast)
+  2. OpenTyphoon AI Fallback (v2.5 support)
+  3. Metadata Extraction (dedicated small AI call + robust text fallback)
+  4. Chunked Checklist Extraction (expanded 300,000 char limit)
+  5. Highly Precise Hallucination/Gibberish Filtering (_is_valid_tor_item)
+  6. Smart Hybrid Text Harvesting (highly granular fallback to ensure ZERO rows are lost)
+  7. AI Critic Self-Correction Loop (with strict anti-truncation safeguards)
+  8. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
+  9. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and filters out non-Thai garbage)
+  10. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
 """
 import os
 import json
@@ -23,17 +26,52 @@ import requests
 from backend.services.knowledge_base import build_tor_knowledge_base, get_knowledge_prompt_section
 from backend.services.ai_critic import evaluate_and_correct_checklist
 
-# OpenTyphoon AI Configuration
+# AI Credentials & Configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TYPHOON_API_KEY = os.getenv("TYPHOON_API_KEY", "sk-Rmn1bvzNfpruBxlQWH9umkZRPPFTWbU4OtMtczKRUsGxnWmG")
 TYPHOON_BASE_URL = "https://api.opentyphoon.ai/v1"
 
-# Optimized Chunk size for OpenTyphoon AI stability (chars per chunk)
+# Optimized Chunk size (chars per chunk)
 CHUNK_SIZE = 8000
 CHUNK_OVERLAP = 600
 
 
+def _call_gemini_ai(system_prompt: str, user_content: str, max_tokens: int = 8192) -> str:
+    """Makes an enterprise-grade call to Google Gemini 1.5 Flash with structured JSON output."""
+    if not GEMINI_API_KEY:
+        return None
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": user_content}]}
+        ],
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}]
+        },
+        "generationConfig": {
+            "temperature": 0.15,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": "application/json"
+        }
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code == 200:
+            candidates = resp.json().get("candidates", [])
+            if candidates:
+                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                if text:
+                    return text
+        else:
+            print(f"[Gemini AI] Failed with status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[Gemini AI] Exception during API call: {e}")
+    return None
+
+
 def _get_target_models() -> list:
-    """Get list of available models using raw requests with clean list/dict parsing."""
+    """Get list of available OpenTyphoon models using raw requests."""
     target_models = [
         "typhoon-v2.5-30b-a3b-instruct",
         "typhoon-v2.5-30b-instruct",
@@ -48,7 +86,6 @@ def _get_target_models() -> list:
             resp_json = resp.json()
             models_data = resp_json if isinstance(resp_json, list) else resp_json.get("data", [])
             available_models = [m.get("id") for m in models_data if isinstance(m, dict) and m.get("id")]
-            print(f"[AI Engine] Discovered models via requests: {available_models}")
             instruct_models = [m for m in available_models if 'instruct' in m.lower()]
             if instruct_models:
                 target_models = instruct_models + target_models
@@ -58,7 +95,17 @@ def _get_target_models() -> list:
 
 
 def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
-    """Makes an AI call with model fallback using raw requests and expanded timeout."""
+    """Makes an AI call with Google Gemini 1.5 Flash primary engine and OpenTyphoon fallback."""
+    # 1. Primary Engine: Google Gemini 1.5 Flash
+    if GEMINI_API_KEY:
+        print("[AI Engine] Initiating extraction via Google Gemini 1.5 Flash...")
+        gemini_text = _call_gemini_ai(system_prompt, user_content, max_tokens=max_tokens * 2)
+        if gemini_text:
+            print("[AI Engine] Gemini 1.5 Flash extraction successful.")
+            return gemini_text
+        print("[AI Engine] Gemini failed or returned empty. Falling back to OpenTyphoon AI...")
+
+    # 2. Fallback Engine: OpenTyphoon AI
     target_models = _get_target_models()
     headers = {
         "Authorization": f"Bearer {TYPHOON_API_KEY}",
@@ -76,7 +123,6 @@ def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> s
                     "temperature": 0.15,
                     "max_tokens": mt
                 }
-                # Expanded timeout to 90s to easily accommodate 4096 tokens
                 resp = requests.post(f"{TYPHOON_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=90)
                 if resp.status_code == 200:
                     text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -100,12 +146,11 @@ def _is_valid_tor_item(item: dict) -> bool:
     if not req or req in ['None', 'null', '']:
         return False
 
-    # Prevent prompt echoing / header bleed (e.g. "ส่วนที่ 31/36 ของเอกสาร TOR")
+    # Prevent prompt echoing / header bleed
     if "ส่วนที่" in req and "ของเอกสาร TOR" in req:
         return False
 
     # 1. Check for repeating letter glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd)
-    # Exclude digits so valid numbers like 1000000 (one million) are perfectly preserved!
     if re.search(r'([A-Za-z])\1{5,}', req):
         print(f"[AI Engine] Dropped repeating string: {req[:40]}")
         return False
@@ -194,7 +239,7 @@ METADATA_SYSTEM_PROMPT = """คุณคือผู้เชี่ยวชา�
 def _extract_metadata(text_content: str) -> dict:
     """Extracts project metadata using AI with robust text parsing fallback."""
     print("[AI Engine] Extracting metadata...")
-    short_text = text_content[:6000] # Inspect first 6000 chars
+    short_text = text_content[:6000]
 
     response_text = _call_ai(METADATA_SYSTEM_PROMPT, f"เอกสาร TOR:\n\n{short_text}", max_tokens=512)
     meta = _parse_json_object(response_text)
@@ -309,7 +354,6 @@ def _harvest_checklist_from_text(chunk_text: str, current_category: str = "ข�
     lines = [l.strip() for l in chunk_text.split('\n') if l.strip() and len(l.strip()) >= 10]
     result = []
     
-    # Powerful keywords covering all aspects of government TORs (Expanded for maximum detail)
     keywords = ["ผู้รับจ้าง", "ต้อง", "ข้อกำหนด", "วัตถุประสงค์", "ขอบเขต",
                  "โครงการ", "ระบบ", "คุณสมบัติ", "เงื่อนไข", "การดำเนินงาน",
                  "มาตรฐาน", "ความปลอดภัย", "การส่งมอบ", "ระยะเวลา", "จัดทำ",
@@ -354,12 +398,10 @@ def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks:
     """Extracts checklist items using AI, with Smart Hybrid Text Harvester fallback."""
     print(f"[AI Engine] Processing chunk {chunk_num}/{total_chunks} ({len(chunk_text)} chars)...")
 
-    # Clean user message without prompt echoing headers
     user_msg = chunk_text
     response_text = _call_ai(system_prompt, user_msg, max_tokens=4096)
     items = _parse_json_array(response_text)
     
-    # HYBRID HARVESTING SAFEGUARD: If AI returns very few items for a large chunk, it glitched or truncated!
     if len(items) < 5 and len(chunk_text) > 1000:
         print(f"[AI Engine] Chunk {chunk_num}: AI returned only {len(items)} items. Triggering Smart Hybrid Text Harvester...")
         harvested = _harvest_checklist_from_text(chunk_text)
@@ -370,14 +412,13 @@ def _extract_checklist_from_chunk(chunk_text: str, chunk_num: int, total_chunks:
 
 
 def _deduplicate_checklist(items: list) -> list:
-    """Removes duplicate items from combined chunks (based on ข้อกำหนด content) and cleans gibberish."""
+    """Removes duplicate items from combined chunks and cleans gibberish."""
     seen = set()
     unique_items = []
     for item in items:
         if not _is_valid_tor_item(item):
             continue
         content = item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')
-        # Use first 100 chars as fingerprint to catch duplicates from chunk overlaps
         fingerprint = content[:100].strip()
         if fingerprint and fingerprint not in seen:
             seen.add(fingerprint)
@@ -435,7 +476,6 @@ def generate_tor_checklist(text_content: str) -> dict:
     Returns:
         dict with keys: "metadata" (dict) and "checklist" (list)
     """
-    # EXPANDED LIMIT: Allow up to 300,000 chars (~100+ pages of PDF text) to guarantee complete extraction
     clean_text = text_content[:300000]
 
     # Step 1: Load Knowledge Base
@@ -483,7 +523,6 @@ def generate_tor_checklist(text_content: str) -> dict:
         corrected = evaluate_and_correct_checklist(clean_text, all_items)
         clean_corrected = [item for item in corrected if isinstance(item, dict) and _is_valid_tor_item(item)] if corrected else []
         
-        # STRICT ANTI-TRUNCATION SAFEGUARD: Accept critic output ONLY if it maintains at least 90% of the items
         if clean_corrected and len(clean_corrected) >= (len(all_items) * 0.9):
             all_items = clean_corrected
             print(f"[AI Engine] Critic completed. Final: {len(all_items)} items")
