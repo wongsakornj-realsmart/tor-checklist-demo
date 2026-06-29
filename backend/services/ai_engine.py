@@ -6,7 +6,7 @@ Dynamic RAG (Knowledge Base), Bulletproof Gibberish Filtering, and Smart Hybrid 
 to guarantee comprehensive, 100% complete checklist extraction.
 
 Architecture:
-  1. Google Gemini 1.5 Flash Integration (1M Context, JSON mode, lightning fast)
+  1. Google Gemini 1.5 Flash Integration (supports flash-latest, flash-002, pro-latest to prevent 404)
   2. OpenTyphoon AI Fallback (v2.5 support)
   3. Metadata Extraction (dedicated small AI call + robust text fallback)
   4. Chunked Checklist Extraction (expanded 300,000 char limit)
@@ -15,7 +15,7 @@ Architecture:
   7. AI Critic Self-Correction Loop (with strict anti-truncation safeguards)
   8. Natural Hierarchical Sorting (ensures perfect sequential numbering e.g. 5, 6, 7, 10)
   9. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and filters out non-Thai garbage)
-  10. Final Polish (guarantees 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ' are populated 100%)
+  10. Final Polish (dynamically populates highly accurate document types and detailed instructions)
 """
 import os
 import json
@@ -37,11 +37,18 @@ CHUNK_OVERLAP = 600
 
 
 def _call_gemini_ai(system_prompt: str, user_content: str, max_tokens: int = 8192) -> str:
-    """Makes an enterprise-grade call to Google Gemini 1.5 Flash with structured JSON output."""
+    """Makes an enterprise-grade call to Google Gemini API with robust model fallback to prevent 404."""
     if not GEMINI_API_KEY:
         return None
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    gemini_models = [
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-pro-002",
+        "gemini-pro"
+    ]
+    
     payload = {
         "contents": [
             {"role": "user", "parts": [{"text": user_content}]}
@@ -55,18 +62,23 @@ def _call_gemini_ai(system_prompt: str, user_content: str, max_tokens: int = 819
             "responseMimeType": "application/json"
         }
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=90)
-        if resp.status_code == 200:
-            candidates = resp.json().get("candidates", [])
-            if candidates:
-                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                if text:
-                    return text
-        else:
-            print(f"[Gemini AI] Failed with status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"[Gemini AI] Exception during API call: {e}")
+    
+    for model in gemini_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            resp = requests.post(url, json=payload, timeout=90)
+            if resp.status_code == 200:
+                candidates = resp.json().get("candidates", [])
+                if candidates:
+                    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                    if text:
+                        print(f"[Gemini AI] Successfully generated content using model: {model}")
+                        return text
+            else:
+                print(f"[Gemini AI] Model {model} failed with status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"[Gemini AI] Exception with model {model}: {e}")
+            continue
     return None
 
 
@@ -95,17 +107,14 @@ def _get_target_models() -> list:
 
 
 def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
-    """Makes an AI call with Google Gemini 1.5 Flash primary engine and OpenTyphoon fallback."""
-    # 1. Primary Engine: Google Gemini 1.5 Flash
+    """Makes an AI call with Google Gemini primary engine and OpenTyphoon fallback."""
     if GEMINI_API_KEY:
-        print("[AI Engine] Initiating extraction via Google Gemini 1.5 Flash...")
+        print("[AI Engine] Initiating extraction via Google Gemini API...")
         gemini_text = _call_gemini_ai(system_prompt, user_content, max_tokens=max_tokens * 2)
         if gemini_text:
-            print("[AI Engine] Gemini 1.5 Flash extraction successful.")
             return gemini_text
         print("[AI Engine] Gemini failed or returned empty. Falling back to OpenTyphoon AI...")
 
-    # 2. Fallback Engine: OpenTyphoon AI
     target_models = _get_target_models()
     headers = {
         "Authorization": f"Bearer {TYPHOON_API_KEY}",
@@ -146,21 +155,17 @@ def _is_valid_tor_item(item: dict) -> bool:
     if not req or req in ['None', 'null', '']:
         return False
 
-    # Prevent prompt echoing / header bleed
     if "ส่วนที่" in req and "ของเอกสาร TOR" in req:
         return False
 
-    # 1. Check for repeating letter glitches (e.g. PPPPPPPPPP, FFFFFFFF, dddddd)
     if re.search(r'([A-Za-z])\1{5,}', req):
         print(f"[AI Engine] Dropped repeating string: {req[:40]}")
         return False
 
-    # 2. Check for bizarre non-Thai / non-English characters (Cyrillic, weird symbols like Ж, ŧ, ț, ç, ŋ)
     if re.search(r'[ЖțçŧÉ¢ŋ]', req):
         print(f"[AI Engine] Dropped corrupted encoding gibberish: {req[:40]}")
         return False
 
-    # 3. Requirement MUST contain at least 3 valid Thai characters (e.g. 'งาน', 'ระบบ', 'จ้าง')
     thai_chars = re.findall(r'[\u0E00-\u0E7F]', req)
     if len(thai_chars) < 3:
         print(f"[AI Engine] Dropped non-Thai item: {req[:40]}")
@@ -288,8 +293,6 @@ def _extract_metadata_from_text(text: str) -> dict:
 def _build_checklist_prompt(knowledge_section: str) -> str:
     """
     Builds the checklist extraction system prompt.
-    CRITICAL FIX: Explicitly mandates high-granularity extraction of every single
-    sentence and bullet point without summarizing. No literal JSON examples.
     """
     prompt = """คุณคือผู้เชี่ยวชาญด้านการจัดซื้อจัดจ้างภาครัฐไทย หน้าที่ของคุณคือวิเคราะห์ข้อความส่วนหนึ่งจากเอกสาร TOR (Terms of Reference) และสกัดข้อกำหนดทุกข้อออกมาเป็นตาราง Checklist อย่างละเอียดถี่ถ้วนที่สุด
 
@@ -347,9 +350,8 @@ def _split_into_chunks(text: str) -> list:
 
 def _harvest_checklist_from_text(chunk_text: str, current_category: str = "ข้อกำหนดและขอบเขตการดำเนินงาน") -> list:
     """
-    Smart Hybrid Text Harvester (High Granularity Edition): Fallback parsing engine
+    Smart Hybrid Text Harvester: Fallback parsing engine
     that accurately harvests all valid TOR requirements directly from text when AI fails.
-    Upgraded to capture deep granularity and ensure ZERO rows are lost.
     """
     lines = [l.strip() for l in chunk_text.split('\n') if l.strip() and len(l.strip()) >= 10]
     result = []
@@ -461,20 +463,6 @@ def _parse_ladap_key(item: dict) -> tuple:
 def generate_tor_checklist(text_content: str) -> dict:
     """
     Main entry point: Extracts structured TOR checklist from document text.
-
-    Pipeline:
-      1. Load Knowledge Base (RAG)
-      2. Extract Metadata (dedicated small AI call + robust text fallback)
-      3. Chunked Checklist Extraction (optimized chunks + Smart Hybrid Text Harvesting)
-      4. Deduplicate & filter out gibberish/hallucinations (_is_valid_tor_item)
-      5. AI Critic Self-Correction Loop (safe non-truncating)
-      6. Natural Hierarchical Sorting (solves out-of-order numbering e.g. 5, 7, 10, 6)
-      7. Ultimate Fail-Safe Fallback (guarantees table is NEVER empty and strictly filters non-Thai garbage)
-      8. Final Polish (populates empty 'ชื่อเอกสารที่ใช้ยื่น' and 'รายละเอียดที่ต้องระบุ')
-      9. Return final result
-
-    Returns:
-        dict with keys: "metadata" (dict) and "checklist" (list)
     """
     clean_text = text_content[:300000]
 
@@ -561,24 +549,50 @@ def generate_tor_checklist(text_content: str) -> dict:
     except Exception as sort_err:
         print(f"[AI Engine] Sorting failed (non-critical): {sort_err}")
 
-    # Step 8: Final Polish - Ensure no empty values in critical columns
-    print("[AI Engine] Step 7: Final Polish (Ensuring required fields are populated)...")
+    # Step 8: Final Polish - Ensure no empty values and enforce deep diversity in document types & instructions
+    print("[AI Engine] Step 7: Final Polish (Ensuring required fields are populated with expert patterns)...")
     for item in all_items:
+        req = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
         doc = str(item.get('ชื่อเอกสารที่ใช้ยื่น', '')).strip()
-        if not doc or doc == 'None':
-            item['ชื่อเอกสารที่ใช้ยื่น'] = "ข้อเสนอทางเทคนิค (Technical Proposal)"
-            
         detail = str(item.get('รายละเอียดที่ต้องระบุ', '')).strip()
-        if not detail or detail == 'None':
-            req_text = str(item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)', '')).strip()
-            if any(kw in req_text for kw in ['ผลงาน', 'ประสบการณ์', 'เคย']):
-                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองผลงานและสำเนาสัญญาที่เกี่ยวข้อง พร้อมรับรองสำเนาถูกต้อง"
-            elif any(kw in req_text for kw in ['นิติบุคคล', 'จดทะเบียน', 'ทุน', 'ล้มละลาย', 'คุณสมบัติ']):
-                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองการจดทะเบียนนิติบุคคล / เอกสารหลักฐานคุณสมบัติ พร้อมลงนามรับรอง"
-            elif any(kw in req_text for kw in ['ระบบ', 'ซอฟต์แวร์', 'ฟังก์ชัน', 'เซิร์ฟเวอร์', 'ความปลอดภัย', 'สถาปัตยกรรม']):
-                item['รายละเอียดที่ต้องระบุ'] = "ระบุข้อเสนอทางเทคนิค อธิบายสถาปัตยกรรมระบบ ฟังก์ชันการทำงาน และวิธีการดำเนินงานอย่างละเอียด"
+
+        # If doc is generic or empty, assign highly specific document types based on requirement content!
+        if not doc or doc == 'None' or doc == 'ข้อเสนอทางเทคนิค (Technical Proposal)':
+            if any(w in req for w in ['ผลงาน', 'ประสบการณ์', 'เคยทำงาน', 'สัญญาที่ผ่านมา']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "หนังสือรับรองผลงานและสำเนาสัญญา"
+            elif any(w in req for w in ['นิติบุคคล', 'จดทะเบียน', 'ทุนจดทะเบียน', 'ล้มละลาย', 'ผู้มีอำนาจ', 'คุณสมบัติของผู้ยื่น']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "เอกสารการจดทะเบียนนิติบุคคล / หลักฐานคุณสมบัติ"
+            elif any(w in req for w in ['ใบอนุญาต', 'หนังสือแต่งตั้ง', 'ตัวแทนจำหน่าย', 'ISO', 'มาตรฐาน', 'CMMI', 'ลิขสิทธิ์']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "เอกสารใบอนุญาต / หนังสือรับรองมาตรฐาน"
+            elif any(w in req for w in ['บุคลากร', 'ผู้จัดการโครงการ', 'ทีมงาน', 'ประวัติการศึกษา', 'ใบรับรอง', 'Certificate']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "ประวัติและหนังสือรับรองคุณสมบัติบุคลากร (CV / Cert)"
+            elif any(w in req for w in ['ใบเสนอราคา', 'ราคา', 'งบประมาณ', 'หลักประกัน', 'บัญชีแสดงรายรับรายจ่าย']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "ข้อเสนอทางด้านราคา / เอกสารหลักประกันการเสนอราคา"
+            elif any(w in req for w in ['ตารางเปรียบเทียบ', 'แคตตาล็อก', 'Catalog', 'Specification', 'ยี่ห้อ', 'สเปก']):
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "แคตตาล็อกและตารางเปรียบเทียบคุณลักษณะ (Catalog / Spec)"
             else:
-                item['รายละเอียดที่ต้องระบุ'] = "ระบุคำอธิบายยืนยันความพร้อมและรายละเอียดวิธีการดำเนินงานตามข้อกำหนด"
+                item['ชื่อเอกสารที่ใช้ยื่น'] = "ข้อเสนอทางเทคนิค (Technical Proposal)"
+
+        # If detail is generic or empty, assign deeply detailed specific instructions!
+        if not detail or detail == 'None' or detail == 'ระบุคำอธิบายยืนยันความพร้อมและรายละเอียดวิธีการดำเนินงานตามข้อกำหนด':
+            if 'หนังสือรับรองผลงาน' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองผลงานการทำงานที่ผ่านมาพร้อมสำเนาสัญญาจ้างที่เกี่ยวข้อง โดยรับรองสำเนาถูกต้องทุกฉบับ"
+            elif 'จดทะเบียนนิติบุคคล' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือรับรองการจดทะเบียนนิติบุคคล (อายุไม่เกิน 6 เดือน) และบัญชีรายชื่อผู้ถือหุ้น พร้อมประทับตราและลงนามผู้มีอำนาจ"
+            elif 'ใบอนุญาต' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบหนังสือแต่งตั้งตัวแทนจำหน่าย (Authorization Letter) หรือเอกสารรับรองมาตรฐาน (เช่น ISO/CMMI) พร้อมรับรองสำเนาถูกต้อง"
+            elif 'บุคลากร' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบประวัติส่วนตัว (CV/Resume) ของทีมงาน พร้อมเอกสารแสดงวุฒิการศึกษาและใบรับรองวิชาชีพ (Certificate) ที่ตรงตามข้อกำหนด"
+            elif 'ด้านราคา' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบใบเสนอราคาตามแบบฟอร์มของหน่วยงาน พร้อมแจกแจงรายละเอียดโครงสร้างราคาและหลักประกันการเสนอราคา"
+            elif 'แคตตาล็อก' in item['ชื่อเอกสารที่ใช้ยื่น']:
+                item['รายละเอียดที่ต้องระบุ'] = "แนบแคตตาล็อกหรือเอกสารแสดงคุณลักษณะทางเทคนิค (โบรชัวร์) พร้อมทำเครื่องหมายชี้แจงจุดที่ตรงกับข้อกำหนดให้ชัดเจน"
+            elif any(w in req for w in ['ระบบ', 'ซอฟต์แวร์', 'ฟังก์ชัน', 'เซิร์ฟเวอร์', 'ความปลอดภัย', 'สถาปัตยกรรม', 'หน้าจอ', 'รายงาน']):
+                item['รายละเอียดที่ต้องระบุ'] = "จัดทำเอกสารข้อเสนอทางเทคนิค อธิบายสถาปัตยกรรมระบบ ฟังก์ชันการทำงาน โครงสร้างข้อมูล และวิธีการพัฒนา/ติดตั้งอย่างละเอียด"
+            elif any(w in req for w in ['ส่งมอบ', 'งวดงาน', 'ระยะเวลา', 'แผนงาน', 'รับประกัน', 'บำรุงรักษา', 'อบรม']):
+                item['รายละเอียดที่ต้องระบุ'] = "ระบุแผนการดำเนินงาน (Work Plan) ตารางเวลาส่งมอบงาน แผนการฝึกอบรม และแนวทางการรับประกัน/บำรุงรักษาระบบอย่างชัดเจน"
+            else:
+                item['รายละเอียดที่ต้องระบุ'] = "ระบุคำอธิบายยืนยันความพร้อมในการดำเนินงาน พร้อมระบุรายละเอียดวิธีการและขั้นตอนการดำเนินงานตามข้อกำหนดข้อนี้อย่างเคร่งครัด"
 
     return {
         "metadata": metadata,

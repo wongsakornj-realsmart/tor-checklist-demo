@@ -4,7 +4,7 @@ AI Critic Agent for TOR Checklist System.
 Acts as a Quality Auditor that reviews and corrects the AI-generated checklist
 items for spelling accuracy, logical coherence, completeness of required fields,
 and compliance with Thai government procurement terminology.
-CRITICAL DESIGN: Uses Google Gemini 1.5 Flash as primary audit engine with OpenTyphoon fallback.
+CRITICAL DESIGN: Uses Google Gemini API as primary audit engine with OpenTyphoon fallback.
 """
 import os
 import json
@@ -53,11 +53,18 @@ CRITIC_SYSTEM_PROMPT = """คุณคือ "AI Critic Agent" ผู้ตร�
 
 
 def _call_gemini_critic_ai(system_prompt: str, user_content: str, max_tokens: int = 8192) -> str:
-    """Makes an enterprise-grade call to Google Gemini 1.5 Flash with structured JSON output."""
+    """Makes an enterprise-grade call to Google Gemini API with robust model fallback to prevent 404."""
     if not GEMINI_API_KEY:
         return None
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    gemini_models = [
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-pro-002",
+        "gemini-pro"
+    ]
+    
     payload = {
         "contents": [
             {"role": "user", "parts": [{"text": user_content}]}
@@ -71,18 +78,23 @@ def _call_gemini_critic_ai(system_prompt: str, user_content: str, max_tokens: in
             "responseMimeType": "application/json"
         }
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=90)
-        if resp.status_code == 200:
-            candidates = resp.json().get("candidates", [])
-            if candidates:
-                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                if text:
-                    return text
-        else:
-            print(f"[Gemini Critic] Failed with status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"[Gemini Critic] Exception during API call: {e}")
+    
+    for model in gemini_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            resp = requests.post(url, json=payload, timeout=90)
+            if resp.status_code == 200:
+                candidates = resp.json().get("candidates", [])
+                if candidates:
+                    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                    if text:
+                        print(f"[Gemini Critic] Successfully generated content using model: {model}")
+                        return text
+            else:
+                print(f"[Gemini Critic] Model {model} failed with status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"[Gemini Critic] Exception with model {model}: {e}")
+            continue
     return None
 
 
@@ -111,17 +123,14 @@ def _get_target_models() -> list:
 
 
 def _call_critic_ai(system_prompt: str, user_content: str, max_tokens: int = 4096) -> str:
-    """Makes a critic AI call with Google Gemini 1.5 Flash primary engine and OpenTyphoon fallback."""
-    # 1. Primary Engine: Google Gemini 1.5 Flash
+    """Makes a critic AI call with Google Gemini primary engine and OpenTyphoon fallback."""
     if GEMINI_API_KEY:
-        print("[AI Critic] Initiating auditing via Google Gemini 1.5 Flash...")
+        print("[AI Critic] Initiating auditing via Google Gemini API...")
         gemini_text = _call_gemini_critic_ai(system_prompt, user_content, max_tokens=max_tokens * 2)
         if gemini_text:
-            print("[AI Critic] Gemini 1.5 Flash auditing successful.")
             return gemini_text
         print("[AI Critic] Gemini failed or returned empty. Falling back to OpenTyphoon AI...")
 
-    # 2. Fallback Engine: OpenTyphoon AI
     target_models = _get_target_models()
     headers = {
         "Authorization": f"Bearer {TYPHOON_API_KEY}",
