@@ -23,8 +23,9 @@ COPY . /app/
 # Set environment variables for Tesseract
 ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata
 
-# Expose port
-EXPOSE 10000
+# Expose port (Cloud Run defaults to 8080, but can be overridden)
+ENV PORT=8080
+EXPOSE $PORT
 
-# Start command
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Start command (Cloud Run passes the PORT environment variable)
+CMD uvicorn backend.main:app --host 0.0.0.0 --port $PORT
