@@ -1,102 +1,109 @@
 import os
 import sys
-import json
-import traceback
-
-# Force stdout to UTF-8 to prevent Windows console cp874 charmap errors
-try:
-    sys.stdout.reconfigure(encoding='utf-8')
-except Exception:
-    pass
-
-sys.path.insert(0, r'D:\CBD\TORChecklist')
 
 from backend.services.ocr_service import extract_text_from_file
 from backend.services.ai_engine import generate_tor_checklist
-from extract_tor import generate_excel_from_data
-from validate_tor import run_validation_on_file
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-def run_tester():
-    files_to_test = [
-        r"D:\DGA\Attach_TOR_1.pdf",
-        r"C:\Users\womgsakorn_j\Documents\SME D Bank\Final\00_Reference_TOR\2_ขอบเขตของงาน.pdf"
+download_dir = r"C:\Users\womgsakorn_j\Downloads"
+os.makedirs(download_dir, exist_ok=True)
+
+test_files = [
+    (r"D:\ทหารผ่านศึก\TOR (1).pdf", os.path.join(download_dir, "TOR (1)_Checklist.xlsx"))
+]
+
+def create_excel_report(data: dict, output_path: str):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TOR Checklist"
+    
+    ws.views.sheetView[0].showGridLines = True
+    
+    font_family = "TH Sarabun PSK"
+    title_font = Font(name=font_family, size=18, bold=True, color="000000")
+    header_font = Font(name=font_family, size=16, bold=True, color="FFFFFF")
+    data_font = Font(name=font_family, size=16, bold=False, color="000000")
+    
+    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    alt_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    
+    thin_border = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='thin', color='D9D9D9')
+    )
+    
+    meta = data.get("metadata", {})
+    project_name = meta.get("project_name", "") or "โครงการจัดซื้อจัดจ้าง"
+    client_name = meta.get("client_name", "") or "หน่วยงานเจ้าของโครงการ"
+    dateline = meta.get("dateline", "") or "-"
+    
+    ws.cell(row=1, column=1, value=f"ชื่อโครงการ (Project Name): {project_name}").font = title_font
+    ws.cell(row=2, column=1, value=f"ชื่อลูกค้า (Client Name): {client_name}").font = title_font
+    ws.cell(row=3, column=1, value=f"Dateline: {dateline}").font = title_font
+    
+    headers = [
+        "Status", "ลำดับ", "หมวดหมู่หลัก", "หัวข้อย่อย",
+        "ข้อกำหนด / รายละเอียด (Requirement / Details)",
+        "ชื่อเอกสารที่ใช้ยื่น", "รายละเอียดที่ต้องระบุ",
+        "Comply?", "หมายเหตุ (Remarks)"
     ]
     
-    BASE_DIR = r'D:\CBD\TORChecklist'
-    TEMPLATE_PATH = os.path.join(BASE_DIR, 'OutputTORChecklist', 'TOR Checklist template.xlsx')
-    OUTPUT_DIR = os.path.join(BASE_DIR, 'OutputTORChecklist')
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    print("===================================================================")
-    print("        STARTING SYSTEM TESTER (E2E AUTOMATED AUDIT)        ")
-    print("===================================================================")
-
-    for idx, file_path in enumerate(files_to_test, 1):
-        print(f"\n\n===================================================================")
-        print(f" TEST # {idx}: {file_path}")
-        print(f"===================================================================")
+    for c_idx, h_text in enumerate(headers, 1):
+        cell = ws.cell(row=5, column=c_idx, value=h_text)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws.row_dimensions[5].height = 35
+    
+    checklist = data.get("checklist", [])
+    current_row = 6
+    for item in checklist:
+        row_values = [
+            item.get("Status", ""),
+            item.get("ลำดับ", ""),
+            item.get("หมวดหมู่หลัก", ""),
+            item.get("หัวข้อย่อย", ""),
+            item.get("ข้อกำหนด / รายละเอียด (Requirement / Details)", ""),
+            item.get("ชื่อเอกสารที่ใช้ยื่น", ""),
+            item.get("รายละเอียดที่ต้องระบุ", ""),
+            item.get("Comply?", "False"),
+            item.get("หมายเหตุ (Remarks)", "")
+        ]
         
-        if not os.path.exists(file_path):
-            print(f"[Error] File does not exist on filesystem: {file_path}")
-            continue
+        for c_idx, val in enumerate(row_values, 1):
+            cell = ws.cell(row=current_row, column=c_idx, value=str(val))
+            cell.font = data_font
+            cell.border = thin_border
             
-        file_size = os.path.getsize(file_path)
-        print(f"[Tester] File found. Size: {file_size / 1024:.2f} KB")
-
-        try:
-            # 1. OCR / Text Extraction
-            print(f"\n[Step 1] Extracting text from PDF...")
-            text_content = extract_text_from_file(file_path)
-            print(f"[Tester] Extracted {len(text_content)} characters.")
-            if len(text_content) > 0:
-                print(f"[Tester] Text Sample Preview:\n{text_content[:300]}...\n")
-
-            # 2. AI Engine (Metadata + RAG + Critic + Sorting + Polish)
-            print(f"\n[Step 2] Executing AI Engine (RAG + Critic + Natural Sort + Polish)...")
-            ai_result = generate_tor_checklist(text_content)
-            
-            metadata = ai_result.get('metadata', {})
-            checklist = ai_result.get('checklist', [])
-            
-            print(f"\n[Tester] === AI Extraction Summary ===")
-            print(f"  * Project Name: {metadata.get('project_name')}")
-            print(f"  * Client Name:  {metadata.get('client_name')}")
-            print(f"  * Dateline:     {metadata.get('dateline')}")
-            print(f"  * Total Items Extracted: {len(checklist)} rows")
-
-            if len(checklist) > 0:
-                print(f"\n[Tester] === Sample 3 Extracted Items (Auditing Granularity & Fields) ===")
-                for item_idx, item in enumerate(checklist[:3], 1):
-                    print(f"\n  [Item {item_idx}]")
-                    print(f"    - ลำดับ: {item.get('ลำดับ')}")
-                    print(f"    - หมวดหมู่หลัก: {item.get('หมวดหมู่หลัก')}")
-                    print(f"    - ข้อกำหนด: {item.get('ข้อกำหนด / รายละเอียด (Requirement / Details)')[:120]}...")
-                    print(f"    - ชื่อเอกสารที่ใช้ยื่น: {item.get('ชื่อเอกสารที่ใช้ยื่น')}")
-                    print(f"    - รายละเอียดที่ต้องระบุ: {item.get('รายละเอียดที่ต้องระบุ')}")
+            if current_row % 2 == 1:
+                cell.fill = alt_fill
+                
+            if c_idx in [1, 2, 8]:
+                cell.alignment = Alignment(horizontal="center", vertical="top")
+            elif c_idx in [3, 4]:
+                cell.alignment = Alignment(horizontal="left", vertical="top")
             else:
-                print(f"[Tester][Error] Checklist extraction returned 0 items!!!")
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                
+        ws.row_dimensions[current_row].height = 28
+        current_row += 1
+        
+    col_widths = {1: 12, 2: 10, 3: 25, 4: 25, 5: 60, 6: 35, 7: 50, 8: 12, 9: 20}
+    for c_idx, width in col_widths.items():
+        ws.column_dimensions[openpyxl.utils.get_column_letter(c_idx)].width = width
+        
+    wb.save(output_path)
+    print(f"[Success] Generated Excel file: {output_path} with {len(checklist)} items.")
 
-            # 3. Generate Excel
-            output_filename = f"TEST_{idx}_{os.path.splitext(os.path.basename(file_path))[0]}_Checklist.xlsx"
-            output_path = os.path.join(OUTPUT_DIR, output_filename)
-            print(f"\n[Step 3] Generating Excel File: {output_path}...")
-            generate_excel_from_data(checklist, TEMPLATE_PATH, output_path, metadata=metadata)
-            
-            if os.path.exists(output_path):
-                print(f"[Tester] Excel generated successfully. Size: {os.path.getsize(output_path) / 1024:.2f} KB")
-            else:
-                print(f"[Tester][Error] Excel file not found at expected path!!!")
-
-            # 4. Run Validation
-            print(f"\n[Step 4] Running Format & Structure Validation...")
-            is_valid = run_validation_on_file(output_path)
-            print(f"[Tester] Validation Status: {'PASSED' if is_valid else 'WARNING'}")
-
-            print(f"\n>>>>> TEST # {idx} COMPLETED SUCCESSFULLY <<<<<")
-
-        except Exception as e:
-            print(f"\n[Tester][FATAL ERROR] Test #{idx} failed with exception:")
-            traceback.print_exc()
-
-if __name__ == "__main__":
-    run_tester()
+for pdf_path, excel_path in test_files:
+    print(f"\n==================================================")
+    print(f"Testing PDF: {pdf_path}")
+    print(f"==================================================")
+    text = extract_text_from_file(pdf_path)
+    print(f"Extracted {len(text)} chars of clean text.")
+    data = generate_tor_checklist(text)
+    create_excel_report(data, excel_path)

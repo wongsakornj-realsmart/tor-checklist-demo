@@ -44,12 +44,12 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) 
       const endpoint = 'https://tor-checklist-demo.onrender.com/api/upload';
       
       setTimeout(() => {
-        setStatusText('OpenTyphoon AI กำลังวิเคราะห์และจัดหมวดหมู่ 9 คอลัมน์...');
+        setStatusText('AI กำลังวิเคราะห์และจัดหมวดหมู่ 9 คอลัมน์...');
         setProgress(60);
       }, 3000);
 
       setTimeout(() => {
-        setStatusText('กำลังสร้างตาราง Excel และอัปโหลดขึ้น Google Drive กลาง...');
+        setStatusText('กำลังสร้างตาราง Excel...');
         setProgress(85);
       }, 6000);
 
@@ -135,7 +135,7 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUploadSuccess, onError }) 
         <div className="progress-bar-container">
           <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
         </div>
-        <p>ขับเคลื่อนด้วย OpenTyphoon AI และ Google Drive Central Storage</p>
+        <p>ขับเคลื่อนด้วย AI อัจฉริยะ (Advanced AI)</p>
       </div>
     );
   }
