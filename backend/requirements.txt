@@ -12,3 +12,4 @@ pandas>=2.0.0
 pytesseract>=0.3.10
 pythainlp>=4.0.0
 python-multipart>=0.0.6
+pypdfium2>=4.0.0
