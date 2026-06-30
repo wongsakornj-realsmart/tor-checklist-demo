@@ -1,12 +1,12 @@
 FROM python:3.10-slim
 
 # Install system dependencies including Tesseract OCR and Thai language data
-RUN apt-get update && apt-get install -y 
-    tesseract-ocr 
-    tesseract-ocr-tha 
-    tesseract-ocr-eng 
-    libgl1-mesa-glx 
-    poppler-utils 
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-tha \
+    tesseract-ocr-eng \
+    libgl1-mesa-glx \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
